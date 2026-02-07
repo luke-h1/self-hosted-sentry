@@ -1,0 +1,187 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - htop
+  - iotop
+  - unattended-upgrades
+  - fail2ban
+  - ufw
+  - nginx
+  - git
+  - jq
+  - logrotate
+  - chrony
+
+write_files:
+  - path: /etc/sentry/domain
+    content: ${domain}
+    permissions: '0644'
+  - path: /etc/sentry/admin_email
+    content: ${sentry_admin_email}
+    permissions: '0600'
+
+  # ── SSH hardening ──────────────────────────
+  - path: /etc/ssh/sshd_config.d/99-hardened.conf
+    permissions: '0600'
+    content: |
+      Port ${ssh_port}
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      X11Forwarding no
+      MaxAuthTries 3
+      MaxSessions 5
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+      AllowAgentForwarding no
+      AllowTcpForwarding no
+      LoginGraceTime 30
+
+  # ── Docker daemon config ───────────────────
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "5m",
+          "max-file": "2"
+        },
+        "default-ulimits": {
+          "nofile": {
+            "Name": "nofile",
+            "Hard": 1048576,
+            "Soft": 1048576
+          }
+        },
+        "live-restore": true,
+        "userland-proxy": false
+      }
+
+  # ── Sysctl tuning (optimized for low RAM) ──
+  - path: /etc/sysctl.d/99-sentry.conf
+    permissions: '0644'
+    content: |
+      # ClickHouse requirement
+      vm.max_map_count = 262144
+      # Higher swappiness for low-RAM server (let swap absorb pressure)
+      vm.swappiness = 60
+      # Don't OOM-kill too aggressively
+      vm.overcommit_memory = 1
+      # Network tuning
+      net.core.somaxconn = 4096
+      net.ipv4.tcp_max_syn_backlog = 4096
+      net.ipv4.tcp_tw_reuse = 1
+      net.ipv4.ip_local_port_range = 1024 65535
+      # TCP keepalive
+      net.ipv4.tcp_keepalive_time = 600
+      net.ipv4.tcp_keepalive_intvl = 60
+      net.ipv4.tcp_keepalive_probes = 3
+      # Security
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.icmp_echo_ignore_broadcasts = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv6.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      # File descriptors
+      fs.file-max = 1048576
+      fs.inotify.max_user_watches = 524288
+
+  - path: /etc/security/limits.d/99-sentry.conf
+    permissions: '0644'
+    content: |
+      *    soft    nofile    1048576
+      *    hard    nofile    1048576
+      root soft    nofile    1048576
+      root hard    nofile    1048576
+      *    soft    nproc     65535
+      *    hard    nproc     65535
+
+  # ── Fail2ban nginx jail ────────────────────
+  - path: /etc/fail2ban/jail.d/nginx.conf
+    permissions: '0644'
+    content: |
+      [nginx-http-auth]
+      enabled = true
+      port    = http,https
+      logpath = /var/log/nginx/sentry-error.log
+      maxretry = 5
+      bantime  = 3600
+
+      [nginx-limit-req]
+      enabled = true
+      port    = http,https
+      logpath = /var/log/nginx/sentry-error.log
+      maxretry = 10
+      bantime  = 600
+
+  # ── Nginx logrotate ────────────────────────
+  - path: /etc/logrotate.d/nginx-sentry
+    permissions: '0644'
+    content: |
+      /var/log/nginx/sentry-*.log {
+        daily
+        missingok
+        rotate 7
+        compress
+        delaycompress
+        notifempty
+        sharedscripts
+        postrotate
+          [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
+        endscript
+      }
+
+runcmd:
+  - mkdir -p /etc/docker
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable docker
+  - systemctl start docker
+  - apt-get install -y docker-compose-plugin
+
+  - useradd -m -s /bin/bash -G docker sentry
+  - passwd -l sentry
+
+  - mkdir -p /opt/sentry/data
+  - mkdir -p /opt/sentry/self-hosted
+
+  - sysctl --system
+
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ${ssh_port}/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  - systemctl enable chrony
+  - systemctl start chrony
+
+  - systemctl enable fail2ban
+  - systemctl restart fail2ban
+
+  - systemctl enable unattended-upgrades
+  - systemctl start unattended-upgrades
+
+  - systemctl restart sshd
+
+  # 8GB swap - critical for 4GB RAM server
+  - fallocate -l 8G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+  - touch /opt/sentry/.cloud-init-complete

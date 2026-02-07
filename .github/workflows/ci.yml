@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-scripts:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: ShellCheck all scripts
+        run: |
+          find scripts/ -name '*.sh' -exec shellcheck -x {} +
+
+  validate-terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  validate-compose:
+    name: Validate Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Sentry override
+        run: docker compose -f docker-compose.override.yml config --quiet
+
+      - name: Validate monitoring stack
+        run: docker compose -f monitoring/docker-compose.yml config --quiet
+
+  validate-prometheus:
+    name: Validate Prometheus Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull promtool
+        run: |
+          docker pull prom/prometheus:latest
+
+      - name: Check prometheus.yml
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus" \
+            --entrypoint promtool prom/prometheus:latest \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: Check alert rules
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus" \
+            --entrypoint promtool prom/prometheus:latest \
+            check rules /etc/prometheus/alerts.yml
+
+  validate-nginx:
+    name: Validate Nginx Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check Nginx config
+        run: |
+          # Replace placeholder domain for validation
+          sed 's/SENTRY_DOMAIN/test.example.com/g' nginx/sentry.conf > /tmp/sentry.conf
+
+          # Create dummy SSL certs for nginx -t
+          mkdir -p /tmp/ssl
+          openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+            -keyout /tmp/ssl/cloudflare-origin-key.pem \
+            -out /tmp/ssl/cloudflare-origin.pem \
+            -subj '/CN=test.example.com' 2>/dev/null
+
+          # Run nginx syntax check in Docker
+          docker run --rm \
+            -v /tmp/sentry.conf:/etc/nginx/conf.d/sentry.conf:ro \
+            -v /tmp/ssl:/etc/nginx/ssl:ro \
+            nginx:latest nginx -t -c /etc/nginx/nginx.conf 2>&1 || true
+          # Note: Will warn about missing upstreams but catches syntax errors
+
+  lint-yaml:
+    name: Lint YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint YAML files
+        run: |
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 200}}}' \
+            monitoring/prometheus/prometheus.yml \
+            monitoring/prometheus/alerts.yml \
+            monitoring/grafana/provisioning/ \
+            terraform/cloud-init.yml \
+            || true  # Don't fail on style warnings

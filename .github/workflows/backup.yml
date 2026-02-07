@@ -1,0 +1,93 @@
+name: Backup
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+
+  workflow_dispatch:
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Backup Sentry
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          cat >> ~/.ssh/config <<EOF
+          Host sentry-server
+            HostName ${{ secrets.SERVER_HOST }}
+            User root
+            Port ${{ secrets.SSH_PORT || 22 }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+
+      - name: Run backup
+        id: backup
+        run: |
+          ssh sentry-server << 'BACKUP'
+          set -euo pipefail
+          cd /opt/sentry/deploy
+
+          echo "=== Starting Sentry backup ==="
+          bash scripts/backup.sh
+          BACKUP
+
+      - name: Verify backup
+        run: |
+          ssh sentry-server << 'VERIFY'
+          set -euo pipefail
+
+          # Determine data dir
+          if [[ -f /etc/sentry/data_dir ]]; then
+            DATA_DIR=$(cat /etc/sentry/data_dir)
+          else
+            DATA_DIR="/opt/sentry/data"
+          fi
+
+          BACKUP_DIR="$DATA_DIR/backups"
+          LATEST=$(ls -t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | head -1)
+
+          if [[ -z "$LATEST" ]]; then
+            echo "[FAIL] No backup archive found"
+            exit 1
+          fi
+
+          SIZE=$(du -sh "$LATEST" | cut -f1)
+          COUNT=$(ls "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
+          TOTAL=$(du -sh "$BACKUP_DIR" | cut -f1)
+          DISK_FREE=$(df -h / | tail -1 | awk '{print $4}')
+
+          echo "[PASS] Latest backup: $(basename $LATEST) ($SIZE)"
+          echo "       Total backups: $COUNT ($TOTAL)"
+          echo "       Disk free: $DISK_FREE"
+
+          # Verify archive integrity
+          if tar -tzf "$LATEST" > /dev/null 2>&1; then
+            echo "[PASS] Archive integrity verified"
+          else
+            echo "[FAIL] Archive is corrupted"
+            exit 1
+          fi
+          VERIFY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          if [[ -n "${{ secrets.MONITOR_WEBHOOK_URL }}" ]]; then
+            curl -sf -X POST -H 'Content-type: application/json' \
+              --data '{"text":"Sentry backup FAILED. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+              "${{ secrets.MONITOR_WEBHOOK_URL }}" || true
+          fi

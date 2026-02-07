@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────
+# Copy this file to terraform.tfvars and fill in your values.
+# NEVER commit terraform.tfvars to version control.
+# ──────────────────────────────────────────────
+
+# Hetzner Cloud API token (from https://console.hetzner.cloud)
+hcloud_token = ""
+
+# Path to your SSH public key
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# PRODUCTION: Restrict SSH to your IP(s) only
+# Find your IP: curl -s https://ifconfig.me
+ssh_allowed_ips = [
+  # "YOUR_IP/32",
+]
+
+# SSH port
+ssh_port = 22
+
+# Server configuration
+# ┌───────────┬────────┬───────┬────────┬──────────────┐
+# │ Type      │ vCPU   │ RAM   │ Disk   │ EUR/mo       │
+# ├───────────┼────────┼───────┼────────┼──────────────┤
+# │ cx22      │ 2      │ 4 GB  │ 40 GB  │ ~3.99 (*)    │
+# │ cx32      │ 4      │ 8 GB  │ 80 GB  │ ~7.49        │
+# │ cpx31     │ 4      │ 8 GB  │ 160 GB │ ~10.49       │
+# │ cpx41     │ 8      │ 16 GB │ 240 GB │ ~18.49       │
+# └───────────┴────────┴───────┴────────┴──────────────┘
+# (*) Under $5/mo total with no volume + free Cloudflare
+server_name     = "sentry"
+server_type     = "cx22"        # 2 vCPU, 4GB RAM, 40GB disk - ~EUR 3.99/mo
+server_location = "nbg1"        # nbg1 (Nuremberg), fsn1 (Falkenstein), hel1 (Helsinki)
+environment     = "production"
+
+# Volume: disabled = use server's built-in 40GB disk (saves ~EUR 2-5/mo)
+# Enable only if you need more storage
+enable_volume  = false
+volume_size_gb = 50
+
+# Cloudflare API token (from https://dash.cloudflare.com/profile/api-tokens)
+# Required permissions: Zone:DNS:Edit, Zone:Zone Settings:Edit
+cloudflare_api_token = ""
+
+# Your domain configuration
+cloudflare_zone_name   = "example.com"         # Root domain in Cloudflare
+cloudflare_record_name = "sentry"              # Subdomain (creates sentry.example.com)
+domain                 = "sentry.example.com"  # Full domain for Sentry
+
+# Sentry admin
+sentry_admin_email = "admin@example.com"

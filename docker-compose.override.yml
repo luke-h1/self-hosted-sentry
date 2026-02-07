@@ -1,0 +1,216 @@
+# Docker Compose override for self-hosted Sentry.
+# Tuned for 4GB RAM + 8GB swap (Hetzner CX22).
+
+services:
+  nginx:
+    ports:
+      - "127.0.0.1:9000:80"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging: &logging-small
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+
+  web:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    logging: &logging-default
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9000/_health/\")'"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  worker:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 200M
+    logging: *logging-default
+
+  cron:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 100M
+    logging: *logging-small
+
+  postgres:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=512MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "wal_buffers=8MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "min_wal_size=64MB"
+      - "-c"
+      - "max_wal_size=256MB"
+      - "-c"
+      - "log_min_duration_statement=2000"
+    logging: *logging-default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging: *logging-small
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
+    logging: *logging-default
+
+  clickhouse:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+        reservations:
+          memory: 384M
+    logging: *logging-default
+
+  snuba-api:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  snuba-consumer:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  snuba-outcomes-consumer:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  snuba-sessions-consumer:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  snuba-transactions-consumer:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  snuba-replacer:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  symbolicator:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging: *logging-small
+
+  relay:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *logging-small
+
+  memcached:
+    restart: unless-stopped
+    command: ["memcached", "-m", "64"]
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+    logging: *logging-small
+
+  vroom:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging: *logging-small
