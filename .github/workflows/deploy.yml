@@ -18,7 +18,6 @@ on:
         options:
           - all
           - sentry
-          - nginx
           - monitoring
 
 concurrency:
@@ -67,72 +66,48 @@ jobs:
             --exclude 'example-app' \
             --exclude 'terraform' \
             --exclude '.env' \
-            --exclude 'k8s' \
             --exclude '*.md' \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ sentry-server:/opt/sentry/deploy/
 
-      - name: Deploy Sentry config
+      - name: Deploy Sentry via Helm
         if: github.event.inputs.target == 'all' || github.event.inputs.target == 'sentry' || github.event_name == 'push'
         run: |
           ssh sentry-server << 'DEPLOY'
           set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           cd /opt/sentry/deploy
 
-          echo "=== Applying Sentry configuration ==="
-          # Re-run install to apply config changes (skips full install if already done)
-          if [[ -d /opt/sentry/self-hosted ]]; then
-            # Copy override file
-            cp docker-compose.override.yml /opt/sentry/self-hosted/docker-compose.override.yml
-            echo "Override file updated"
+          echo "=== Upgrading Sentry via Helm ==="
+          if helm -n sentry status sentry &>/dev/null; then
+            # Apply updated ClickHouse manifest
+            kubectl apply -f k8s/clickhouse.yaml
 
-            # Restart to pick up changes
-            cd /opt/sentry/self-hosted
-            docker compose up -d
-            echo "Sentry containers restarted"
+            # Helm upgrade with existing values + new values file
+            helm upgrade sentry sentry/sentry -n sentry \
+              -f k8s/sentry-values.yaml \
+              --reuse-values \
+              --timeout 15m --wait
+            echo "Sentry upgraded"
           else
             echo "Sentry not installed yet. Run 'make install' on the server first."
             exit 1
           fi
           DEPLOY
 
-      - name: Deploy Nginx config
-        if: github.event.inputs.target == 'all' || github.event.inputs.target == 'nginx' || github.event_name == 'push'
-        run: |
-          ssh sentry-server << 'DEPLOY'
-          set -euo pipefail
-          cd /opt/sentry/deploy
-
-          if [[ -f /etc/nginx/sites-available/sentry ]]; then
-            echo "=== Updating Nginx configuration ==="
-            source .env 2>/dev/null || true
-            DOMAIN="${SENTRY_DOMAIN:-localhost}"
-
-            cp nginx/sentry.conf /etc/nginx/sites-available/sentry
-            sed -i "s/SENTRY_DOMAIN/$DOMAIN/g" /etc/nginx/sites-available/sentry
-
-            nginx -t && systemctl reload nginx
-            echo "Nginx reloaded"
-          else
-            echo "Nginx not configured yet. Run 'make nginx' on the server first."
-          fi
-          DEPLOY
-
-      - name: Deploy monitoring stack
+      - name: Deploy monitoring
         if: github.event.inputs.target == 'all' || github.event.inputs.target == 'monitoring' || github.event_name == 'push'
         run: |
           ssh sentry-server << 'DEPLOY'
           set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           cd /opt/sentry/deploy
 
-          if docker compose -f monitoring/docker-compose.yml ps --quiet 2>/dev/null | grep -q .; then
+          if kubectl -n monitoring get pods --no-headers 2>/dev/null | grep -q .; then
             echo "=== Updating monitoring stack ==="
-            source .env 2>/dev/null || true
-            export SENTRY_DOMAIN="${SENTRY_DOMAIN:-localhost}"
-            export GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
-            export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
-
-            docker compose -f monitoring/docker-compose.yml up -d
+            kubectl apply -f k8s/monitoring/prometheus.yaml
+            kubectl apply -f k8s/monitoring/grafana.yaml
+            kubectl apply -f k8s/monitoring/node-exporter.yaml
             echo "Monitoring stack updated"
           else
             echo "Monitoring not running. Run 'make monitoring-setup' on the server first."
@@ -146,11 +121,12 @@ jobs:
 
           ssh sentry-server << 'CHECK'
           set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
           echo "=== Post-deploy health check ==="
 
           # Sentry
-          HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 http://127.0.0.1:9000/_health/ 2>/dev/null || echo "000")
+          HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 http://127.0.0.1/_health/ 2>/dev/null || echo "000")
           if [[ "$HTTP" == "200" ]]; then
             echo "[PASS] Sentry is healthy"
           else
@@ -158,28 +134,21 @@ jobs:
             exit 1
           fi
 
-          # Nginx
-          if systemctl is-active --quiet nginx; then
-            echo "[PASS] Nginx is running"
+          # K3s
+          NODE_STATUS=$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+          if [[ "$NODE_STATUS" == "True" ]]; then
+            echo "[PASS] K3s node Ready"
           else
-            echo "[FAIL] Nginx is not running"
+            echo "[FAIL] K3s node not Ready"
             exit 1
           fi
 
-          # Prometheus
-          PROM=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:9090/-/healthy 2>/dev/null || echo "000")
-          if [[ "$PROM" == "200" ]]; then
-            echo "[PASS] Prometheus is healthy"
+          # Pods
+          NOT_RUNNING=$(kubectl -n sentry get pods --no-headers 2>/dev/null | grep -cvE "Running|Completed" || echo "0")
+          if [[ "$NOT_RUNNING" -gt 0 ]]; then
+            echo "[WARN] $NOT_RUNNING pod(s) not running"
           else
-            echo "[WARN] Prometheus returned HTTP $PROM (monitoring may not be set up)"
-          fi
-
-          # Grafana
-          GRAF=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:3000/grafana/api/health 2>/dev/null || echo "000")
-          if [[ "$GRAF" == "200" ]]; then
-            echo "[PASS] Grafana is healthy"
-          else
-            echo "[WARN] Grafana returned HTTP $GRAF"
+            echo "[PASS] All sentry pods running"
           fi
 
           echo "=== Deploy complete ==="

@@ -1,0 +1,132 @@
+# ClickHouse for Sentry (chart v28+ requires external ClickHouse)
+# Single node, tuned for 32GB RAM server
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: sentry
+  labels:
+    app: clickhouse
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+    - name: tcp
+      port: 9000
+      targetPort: 9000
+  selector:
+    app: clickhouse
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: sentry
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          ports:
+            - containerPort: 8123
+              name: http
+            - containerPort: 9000
+              name: tcp
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              memory: 1Gi
+              cpu: 200m
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d/sentry.xml
+              subPath: sentry.xml
+            - name: users-config
+              mountPath: /etc/clickhouse-server/users.d/sentry.xml
+              subPath: sentry.xml
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: clickhouse-config
+        - name: users-config
+          configMap:
+            name: clickhouse-users-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: sentry
+data:
+  sentry.xml: |
+    <clickhouse>
+      <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+      <mark_cache_size>268435456</mark_cache_size>
+      <max_concurrent_queries>20</max_concurrent_queries>
+      <logger>
+        <level>warning</level>
+        <console>true</console>
+      </logger>
+    </clickhouse>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-users-config
+  namespace: sentry
+data:
+  sentry.xml: |
+    <clickhouse>
+      <profiles>
+        <default>
+          <allow_experimental_json_type>1</allow_experimental_json_type>
+        </default>
+      </profiles>
+      <users>
+        <default>
+          <password></password>
+          <networks>
+            <ip>::/0</ip>
+          </networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </default>
+      </users>
+    </clickhouse>

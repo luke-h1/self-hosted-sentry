@@ -39,6 +39,7 @@ jobs:
         run: |
           ssh sentry-server << 'BACKUP'
           set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           cd /opt/sentry/deploy
 
           echo "=== Starting Sentry backup ==="
@@ -50,14 +51,7 @@ jobs:
           ssh sentry-server << 'VERIFY'
           set -euo pipefail
 
-          # Determine data dir
-          if [[ -f /etc/sentry/data_dir ]]; then
-            DATA_DIR=$(cat /etc/sentry/data_dir)
-          else
-            DATA_DIR="/opt/sentry/data"
-          fi
-
-          BACKUP_DIR="$DATA_DIR/backups"
+          BACKUP_DIR="/opt/sentry/backups"
           LATEST=$(ls -t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | head -1)
 
           if [[ -z "$LATEST" ]]; then

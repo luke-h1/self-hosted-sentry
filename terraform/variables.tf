@@ -25,9 +25,9 @@ variable "server_name" {
 }
 
 variable "server_type" {
-  description = "CX22 (~EUR 4/mo): 2 vCPU, 4GB RAM, 40GB disk"
+  description = "CX53 (~EUR 28.49/mo): 16 vCPU, 32GB RAM, 240GB disk"
   type        = string
-  default     = "cx22"
+  default     = "cx53"
 }
 
 variable "server_location" {

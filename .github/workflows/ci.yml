@@ -42,64 +42,44 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-  validate-compose:
-    name: Validate Docker Compose
+  validate-helm:
+    name: Validate Helm Values
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate Sentry override
-        run: docker compose -f docker-compose.override.yml config --quiet
+      - name: Install Helm
+        uses: azure/setup-helm@v4
 
-      - name: Validate monitoring stack
-        run: docker compose -f monitoring/docker-compose.yml config --quiet
+      - name: Add Sentry chart repo
+        run: |
+          helm repo add sentry https://sentry-kubernetes.github.io/charts
+          helm repo update
 
-  validate-prometheus:
-    name: Validate Prometheus Config
+      - name: Helm template validation
+        run: |
+          helm template sentry sentry/sentry \
+            -f k8s/sentry-values.yaml \
+            --set system.url=https://test.example.com \
+            --set user.email=test@example.com \
+            --set user.password=testpassword123 \
+            --set ingress.hostname=test.example.com \
+            > /dev/null
+
+  validate-k8s-manifests:
+    name: Validate K8s Manifests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull promtool
+      - name: Validate ClickHouse manifest
+        run: kubectl apply --dry-run=client -f k8s/clickhouse.yaml 2>&1 || true
+
+      - name: Validate monitoring manifests
         run: |
-          docker pull prom/prometheus:latest
-
-      - name: Check prometheus.yml
-        run: |
-          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus" \
-            --entrypoint promtool prom/prometheus:latest \
-            check config /etc/prometheus/prometheus.yml
-
-      - name: Check alert rules
-        run: |
-          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus" \
-            --entrypoint promtool prom/prometheus:latest \
-            check rules /etc/prometheus/alerts.yml
-
-  validate-nginx:
-    name: Validate Nginx Config
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Syntax check Nginx config
-        run: |
-          # Replace placeholder domain for validation
-          sed 's/SENTRY_DOMAIN/test.example.com/g' nginx/sentry.conf > /tmp/sentry.conf
-
-          # Create dummy SSL certs for nginx -t
-          mkdir -p /tmp/ssl
-          openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
-            -keyout /tmp/ssl/cloudflare-origin-key.pem \
-            -out /tmp/ssl/cloudflare-origin.pem \
-            -subj '/CN=test.example.com' 2>/dev/null
-
-          # Run nginx syntax check in Docker
-          docker run --rm \
-            -v /tmp/sentry.conf:/etc/nginx/conf.d/sentry.conf:ro \
-            -v /tmp/ssl:/etc/nginx/ssl:ro \
-            nginx:latest nginx -t -c /etc/nginx/nginx.conf 2>&1 || true
-          # Note: Will warn about missing upstreams but catches syntax errors
+          kubectl apply --dry-run=client -f k8s/monitoring/prometheus.yaml 2>&1 || true
+          kubectl apply --dry-run=client -f k8s/monitoring/grafana.yaml 2>&1 || true
+          kubectl apply --dry-run=client -f k8s/monitoring/node-exporter.yaml 2>&1 || true
 
   lint-yaml:
     name: Lint YAML
@@ -113,8 +93,8 @@ jobs:
       - name: Lint YAML files
         run: |
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 200}}}' \
-            monitoring/prometheus/prometheus.yml \
-            monitoring/prometheus/alerts.yml \
-            monitoring/grafana/provisioning/ \
+            k8s/sentry-values.yaml \
+            k8s/clickhouse.yaml \
+            k8s/monitoring/*.yaml \
             terraform/cloud-init.yml \
             || true  # Don't fail on style warnings

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prepare a fresh Hetzner server for Sentry.
-# Optimized for CX22 (4GB RAM). Idempotent.
+# Prepare a fresh Hetzner server for Sentry on K3s.
+# Optimized for CX33 (8GB RAM). Idempotent.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,43 +16,37 @@ if [[ $EUID -ne 0 ]]; then
   echo "ERROR: run as root"; exit 1
 fi
 
-echo "[1/11] Updating packages..."
+echo "[1/9] Updating packages..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 
-echo "[2/11] Installing dependencies..."
+echo "[2/9] Installing dependencies..."
 apt-get install -y -qq \
   apt-transport-https ca-certificates curl gnupg lsb-release \
-  htop iotop git nginx fail2ban ufw unattended-upgrades jq logrotate chrony
+  htop iotop git fail2ban ufw unattended-upgrades jq chrony
 
-echo "[3/11] Installing Docker..."
-if ! command -v docker &>/dev/null; then
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable docker && systemctl start docker
+echo "[3/9] Installing K3s..."
+if ! command -v k3s &>/dev/null; then
+  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server" sh -s - \
+    --write-kubeconfig-mode 644 \
+    --disable=servicelb
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  echo "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> /etc/profile.d/k3s.sh
 else
-  echo "  already installed: $(docker --version)"
+  echo "  already installed: $(k3s --version | head -1)"
 fi
 
-mkdir -p /etc/docker
-cat > /etc/docker/daemon.json <<'EOF'
-{
-  "log-driver": "json-file",
-  "log-opts": { "max-size": "5m", "max-file": "2" },
-  "default-ulimits": { "nofile": { "Name": "nofile", "Hard": 1048576, "Soft": 1048576 } },
-  "live-restore": true,
-  "userland-proxy": false
-}
-EOF
-systemctl restart docker
-
-echo "[4/11] Installing Docker Compose..."
-if ! docker compose version &>/dev/null; then
-  apt-get install -y -qq docker-compose-plugin
+echo "[4/9] Installing Helm..."
+if ! command -v helm &>/dev/null; then
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  helm repo add sentry https://sentry-kubernetes.github.io/charts
+  helm repo update
 else
-  echo "  already installed: $(docker compose version)"
+  echo "  already installed: $(helm version --short)"
+  helm repo update
 fi
 
-echo "[5/11] Hardening SSH..."
+echo "[5/9] Hardening SSH..."
 cat > /etc/ssh/sshd_config.d/99-hardened.conf <<SSHCFG
 Port ${SSH_PORT}
 PermitRootLogin prohibit-password
@@ -69,16 +63,17 @@ LoginGraceTime 30
 SSHCFG
 systemctl restart sshd
 
-echo "[6/11] Configuring firewall..."
+echo "[6/9] Configuring firewall..."
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow "${SSH_PORT}/tcp"
 ufw allow 80/tcp
 ufw allow 443/tcp
+ufw allow 6443/tcp
 ufw --force enable
 
-echo "[7/11] Configuring fail2ban..."
+echo "[7/9] Configuring fail2ban..."
 cat > /etc/fail2ban/jail.d/sshd.conf <<EOF
 [sshd]
 enabled  = true
@@ -87,28 +82,9 @@ maxretry = 3
 bantime  = 3600
 findtime = 600
 EOF
-
-cat > /etc/fail2ban/jail.d/nginx.conf <<'EOF'
-[nginx-http-auth]
-enabled  = true
-port     = http,https
-logpath  = /var/log/nginx/sentry-error.log
-maxretry = 5
-bantime  = 3600
-
-[nginx-limit-req]
-enabled  = true
-port     = http,https
-logpath  = /var/log/nginx/sentry-error.log
-maxretry = 10
-bantime  = 600
-EOF
 systemctl enable fail2ban && systemctl restart fail2ban
 
-echo "[8/11] Enabling NTP..."
-systemctl enable chrony && systemctl start chrony
-
-echo "[9/11] Tuning kernel..."
+echo "[8/9] Tuning kernel..."
 cat > /etc/sysctl.d/99-sentry.conf <<'EOF'
 vm.max_map_count = 262144
 vm.swappiness = 60
@@ -143,7 +119,7 @@ root hard nofile 1048576
 *    hard nproc  65535
 EOF
 
-echo "[10/11] Configuring 8GB swap..."
+echo "[9/9] Configuring 8GB swap..."
 if [[ ! -f /swapfile ]]; then
   fallocate -l 8G /swapfile
   chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
@@ -159,24 +135,10 @@ else
   echo "  already configured"
 fi
 
-echo "[11/11] Configuring log rotation..."
-cat > /etc/logrotate.d/nginx-sentry <<'EOF'
-/var/log/nginx/sentry-*.log {
-  daily
-  missingok
-  rotate 7
-  compress
-  delaycompress
-  notifempty
-  sharedscripts
-  postrotate
-    [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
-  endscript
-}
-EOF
-
+systemctl enable chrony && systemctl start chrony
 systemctl enable unattended-upgrades && systemctl start unattended-upgrades
 
 echo ""
 echo "Done. RAM: $(free -h | awk '/^Mem:/ {print $2}'), Swap: $(free -h | awk '/^Swap:/ {print $2}'), Disk: $(df -h / | tail -1 | awk '{print $4}') free"
+echo "K3s: $(kubectl get nodes -o wide 2>/dev/null | tail -1 || echo 'starting...')"
 echo "Next: ./scripts/install-sentry.sh"

@@ -31,6 +31,10 @@ Thumbs.db
 *.swo
 *~
 
+# K8s secrets & kubeconfig
+k8s/secrets/
+*.kubeconfig
+
 # Backups (local only)
 backups/
 

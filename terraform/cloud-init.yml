@@ -14,10 +14,8 @@ packages:
   - unattended-upgrades
   - fail2ban
   - ufw
-  - nginx
   - git
   - jq
-  - logrotate
   - chrony
 
 write_files:
@@ -44,27 +42,6 @@ write_files:
       AllowAgentForwarding no
       AllowTcpForwarding no
       LoginGraceTime 30
-
-  # ── Docker daemon config ───────────────────
-  - path: /etc/docker/daemon.json
-    permissions: '0644'
-    content: |
-      {
-        "log-driver": "json-file",
-        "log-opts": {
-          "max-size": "5m",
-          "max-file": "2"
-        },
-        "default-ulimits": {
-          "nofile": {
-            "Name": "nofile",
-            "Hard": 1048576,
-            "Soft": 1048576
-          }
-        },
-        "live-restore": true,
-        "userland-proxy": false
-      }
 
   # ── Sysctl tuning (optimized for low RAM) ──
   - path: /etc/sysctl.d/99-sentry.conf
@@ -109,53 +86,31 @@ write_files:
       *    soft    nproc     65535
       *    hard    nproc     65535
 
-  # ── Fail2ban nginx jail ────────────────────
-  - path: /etc/fail2ban/jail.d/nginx.conf
+  # ── Fail2ban SSH jail ──────────────────────
+  - path: /etc/fail2ban/jail.d/sshd.conf
     permissions: '0644'
     content: |
-      [nginx-http-auth]
-      enabled = true
-      port    = http,https
-      logpath = /var/log/nginx/sentry-error.log
-      maxretry = 5
+      [sshd]
+      enabled  = true
+      port     = ${ssh_port}
+      maxretry = 3
       bantime  = 3600
-
-      [nginx-limit-req]
-      enabled = true
-      port    = http,https
-      logpath = /var/log/nginx/sentry-error.log
-      maxretry = 10
-      bantime  = 600
-
-  # ── Nginx logrotate ────────────────────────
-  - path: /etc/logrotate.d/nginx-sentry
-    permissions: '0644'
-    content: |
-      /var/log/nginx/sentry-*.log {
-        daily
-        missingok
-        rotate 7
-        compress
-        delaycompress
-        notifempty
-        sharedscripts
-        postrotate
-          [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
-        endscript
-      }
+      findtime = 600
 
 runcmd:
-  - mkdir -p /etc/docker
-  - curl -fsSL https://get.docker.com | sh
-  - systemctl enable docker
-  - systemctl start docker
-  - apt-get install -y docker-compose-plugin
+  # K3s
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server" sh -s - --write-kubeconfig-mode 644
+  - export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-  - useradd -m -s /bin/bash -G docker sentry
+  # Helm
+  - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  - helm repo add sentry https://sentry-kubernetes.github.io/charts
+  - helm repo update
+
+  - useradd -m -s /bin/bash sentry
   - passwd -l sentry
 
-  - mkdir -p /opt/sentry/data
-  - mkdir -p /opt/sentry/self-hosted
+  - mkdir -p /opt/sentry/deploy
 
   - sysctl --system
 
@@ -164,6 +119,7 @@ runcmd:
   - ufw allow ${ssh_port}/tcp
   - ufw allow 80/tcp
   - ufw allow 443/tcp
+  - ufw allow 6443/tcp
   - ufw --force enable
 
   - systemctl enable chrony
@@ -177,7 +133,7 @@ runcmd:
 
   - systemctl restart sshd
 
-  # 8GB swap - critical for 4GB RAM server
+  # 8GB swap - critical for 8GB RAM server
   - fallocate -l 8G /swapfile
   - chmod 600 /swapfile
   - mkswap /swapfile

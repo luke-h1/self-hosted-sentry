@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Health check for self-hosted Sentry.
+# Health check for Sentry on K3s.
 # Usage: ./monitor.sh [--webhook]
 set -euo pipefail
 
-SENTRY_DIR="/opt/sentry/self-hosted"
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+NAMESPACE="sentry"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -25,22 +26,21 @@ warn() { echo "  [WARN] $1"; }
 echo "Health check - $(date -Iseconds)"
 
 # Sentry HTTP
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 http://127.0.0.1:9000/_health/ 2>/dev/null || echo "000")
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 http://127.0.0.1/_health/ 2>/dev/null || echo "000")
 [[ "$HTTP" == "200" ]] && pass "Sentry (HTTP $HTTP)" || fail "Sentry (HTTP $HTTP)"
 
-# Containers
-cd "$SENTRY_DIR"
-UNHEALTHY=(); STOPPED=()
-while IFS= read -r line; do
-  NAME=$(echo "$line" | awk '{print $1}')
-  STATUS=$(echo "$line" | awk '{$1=""; print $0}' | xargs)
-  [[ "$STATUS" == *"unhealthy"* ]] && UNHEALTHY+=("$NAME")
-  [[ "$STATUS" == *"Exit"* || "$STATUS" == *"exited"* ]] && STOPPED+=("$NAME")
-done < <(docker compose ps --format "{{.Name}} {{.Status}}" 2>/dev/null)
+# K3s node
+NODE_STATUS=$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+[[ "$NODE_STATUS" == "True" ]] && pass "K3s node Ready" || fail "K3s node not Ready ($NODE_STATUS)"
 
-RUNNING=$(docker compose ps --status running -q 2>/dev/null | wc -l)
-[[ ${#UNHEALTHY[@]} -gt 0 ]] && fail "Unhealthy: ${UNHEALTHY[*]}" || pass "No unhealthy containers"
-[[ ${#STOPPED[@]} -gt 0 ]] && fail "Stopped: ${STOPPED[*]}" || pass "$RUNNING containers running"
+# Pods
+NOT_RUNNING=$(kubectl -n "$NAMESPACE" get pods --no-headers 2>/dev/null | grep -cvE "Running|Completed" || echo "0")
+TOTAL_PODS=$(kubectl -n "$NAMESPACE" get pods --no-headers 2>/dev/null | wc -l | xargs)
+[[ "$NOT_RUNNING" -gt 0 ]] && fail "$NOT_RUNNING of $TOTAL_PODS pods not running" || pass "$TOTAL_PODS pods running"
+
+# CrashLoopBackOff check
+CRASH_PODS=$(kubectl -n "$NAMESPACE" get pods --no-headers 2>/dev/null | grep -c "CrashLoopBackOff" || echo "0")
+[[ "$CRASH_PODS" -gt 0 ]] && fail "$CRASH_PODS pod(s) in CrashLoopBackOff"
 
 # Disk
 ROOT_PCT=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
@@ -56,17 +56,22 @@ SWAP_TOTAL=$(free -m | awk '/^Swap:/ {print $2}')
 SWAP_USED=$(free -m | awk '/^Swap:/ {print $3}')
 [[ $SWAP_TOTAL -gt 0 ]] && { PCT=$((SWAP_USED * 100 / SWAP_TOTAL)); [[ $PCT -gt 80 ]] && warn "Swap: ${PCT}%" || pass "Swap: ${PCT}%"; }
 
-# Postgres & Redis
-PG=$(docker compose exec -T postgres pg_isready -U postgres 2>/dev/null && echo "ok" || echo "fail")
-[[ "$PG" == *"ok"* ]] && pass "PostgreSQL" || fail "PostgreSQL"
-REDIS=$(docker compose exec -T redis redis-cli ping 2>/dev/null || echo "fail")
-[[ "$REDIS" == *"PONG"* ]] && pass "Redis" || fail "Redis"
+# PostgreSQL
+PG_POD=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [[ -n "$PG_POD" ]]; then
+  PG=$(kubectl -n "$NAMESPACE" exec "$PG_POD" -- pg_isready -U postgres 2>/dev/null && echo "ok" || echo "fail")
+  [[ "$PG" == *"ok"* ]] && pass "PostgreSQL" || fail "PostgreSQL"
+else
+  fail "PostgreSQL pod not found"
+fi
 
-# SSL cert
-if [[ -f /etc/nginx/ssl/cloudflare-origin.pem ]]; then
-  EXPIRY=$(openssl x509 -enddate -noout -in /etc/nginx/ssl/cloudflare-origin.pem 2>/dev/null | cut -d= -f2)
-  DAYS=$(( ($(date -d "$EXPIRY" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
-  [[ $DAYS -lt 30 ]] && fail "SSL expires in $DAYS days" || [[ $DAYS -lt 90 ]] && warn "SSL expires in $DAYS days" || pass "SSL valid ($DAYS days)"
+# Redis
+REDIS_POD=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [[ -n "$REDIS_POD" ]]; then
+  REDIS=$(kubectl -n "$NAMESPACE" exec "$REDIS_POD" -- redis-cli ping 2>/dev/null || echo "fail")
+  [[ "$REDIS" == *"PONG"* ]] && pass "Redis" || fail "Redis"
+else
+  fail "Redis pod not found"
 fi
 
 echo ""

@@ -1,6 +1,6 @@
 # Self-Hosted Sentry
 
-Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with Cloudflare, Prometheus, Grafana, and GitHub Actions CI/CD. Runs on a single ~$4/mo server.
+Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with K3s, Helm, Cloudflare, Prometheus, Grafana, and GitHub Actions CI/CD. Runs on a single ~$7/mo server.
 
 ## Why?
 
@@ -18,9 +18,8 @@ Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan
   - [Prerequisites](#prerequisites)
   - [1. Configure](#1-configure)
   - [2. Provision infrastructure](#2-provision-infrastructure)
-  - [3. Cloudflare Origin Certificate](#3-cloudflare-origin-certificate)
-  - [4. Deploy Sentry](#4-deploy-sentry)
-  - [5. Post-deploy](#5-post-deploy)
+  - [3. Deploy Sentry](#3-deploy-sentry)
+  - [4. Post-deploy](#4-post-deploy)
 - [Operations](#operations)
   - [Service management](#service-management)
   - [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
@@ -45,49 +44,50 @@ Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan
 
 ## Cost breakdown
 
-| Resource                                 | Cost                        |
-| ---------------------------------------- | --------------------------- |
-| Hetzner CX22 (2 vCPU, 4GB RAM, 40GB SSD) | ~EUR 3.99/mo                |
-| Cloudflare (free plan)                   | $0                          |
-| Separate volume                          | Disabled (uses server disk) |
-| **Total**                                | **~$4.35/mo**               |
+| Resource                                  | Cost                        |
+| ----------------------------------------- | --------------------------- |
+| Hetzner CX33 (4 vCPU, 8GB RAM, 80GB SSD) | ~EUR 7.49/mo                |
+| Cloudflare (free plan)                    | $0                          |
+| **Total**                                 | **~$7.49/mo**               |
 
 ## Architecture
 
 ```
-User -> Cloudflare (DNS + CDN + WAF + SSL) -> Hetzner CX22 -> Nginx -> Sentry (Docker Compose)
-                                                            -> Prometheus + Grafana (monitoring)
+User -> Cloudflare (DNS + CDN + WAF + SSL) -> Hetzner CX33 -> K3s Traefik Ingress -> Sentry (Helm chart)
+                                                             -> Prometheus + Grafana (K8s monitoring)
 ```
 
-The CX22 runs everything on a single box: Sentry's 15+ Docker containers, Nginx reverse proxy, Prometheus, Grafana, and node_exporter. It works via 4GB RAM + 8GB swap.
+The CX33 runs everything on a single K3s node: Sentry's pods (web, worker, consumers, relay, snuba, PostgreSQL, Redis, Kafka, ClickHouse), Traefik ingress, Prometheus, Grafana, and node-exporter. Cloudflare terminates TLS; Traefik handles HTTP routing.
 
 ## Core dependencies
 
-| Technology                                                     | Category        | Description                                        |
-| -------------------------------------------------------------- | --------------- | -------------------------------------------------- |
-| [Sentry self-hosted](https://github.com/getsentry/self-hosted) | Error tracking  | Official self-hosted distribution (Docker Compose) |
-| [Hetzner Cloud](https://www.hetzner.com/cloud)                 | Infrastructure  | CX22 server (~EUR 4/mo)                            |
-| [Cloudflare](https://cloudflare.com)                           | DNS / CDN / SSL | Free plan with Origin Certificates                 |
-| [Terraform](https://www.terraform.io/)                         | IaC             | Provisions server + DNS + SSL settings             |
-| [Nginx](https://nginx.org/)                                    | Reverse proxy   | SSL termination, rate limiting, Cloudflare real IP |
-| [Prometheus](https://prometheus.io/)                           | Metrics         | Scrapes node, container, and Nginx metrics         |
-| [Grafana](https://grafana.com/)                                | Dashboards      | Pre-built server health dashboard                  |
-| [k6](https://k6.io/)                                           | Load testing    | 60k users/hour simulation                          |
-| [GitHub Actions](https://github.com/features/actions)          | CI/CD           | Lint, deploy, load test, health check              |
+| Technology                                                                   | Category        | Description                                                 |
+| ---------------------------------------------------------------------------- | --------------- | ----------------------------------------------------------- |
+| [Sentry Helm chart](https://github.com/sentry-kubernetes/charts)            | Error tracking  | Community Helm chart for Sentry on Kubernetes               |
+| [K3s](https://k3s.io/)                                                       | Orchestration   | Lightweight Kubernetes with built-in Traefik ingress        |
+| [Helm](https://helm.sh/)                                                     | Package manager | Manages Sentry deployment and upgrades                      |
+| [Hetzner Cloud](https://www.hetzner.com/cloud)                               | Infrastructure  | CX33 server (~EUR 7.49/mo)                                 |
+| [Cloudflare](https://cloudflare.com)                                         | DNS / CDN / SSL | Free plan with TLS termination                              |
+| [Terraform](https://www.terraform.io/)                                       | IaC             | Provisions server + DNS + SSL settings                      |
+| [Prometheus](https://prometheus.io/)                                         | Metrics         | Scrapes node and pod metrics via K8s service discovery       |
+| [Grafana](https://grafana.com/)                                              | Dashboards      | Server health dashboards                                    |
+| [k6](https://k6.io/)                                                         | Load testing    | 60k users/hour simulation                                  |
+| [GitHub Actions](https://github.com/features/actions)                        | CI/CD           | Lint, deploy via Helm, health check                         |
 
 ## Tradeoffs
 
 > [!IMPORTANT]
-> The official Sentry docs recommend **4 CPU, 16GB RAM + 16GB swap, 20GB disk** as minimum. This setup runs on 2 vCPU + 4GB RAM + 8GB swap, which is well below that. It works for small teams but comes with tradeoffs.
+> The official Sentry docs recommend **4 CPU, 16GB RAM + 16GB swap, 20GB disk** as minimum. This setup runs on 4 vCPU + 8GB RAM + 8GB swap with aggressive memory limits and non-essential features disabled. It works for small teams but comes with tradeoffs.
 
-- **Startup is slow**: ~2-3 min for all containers to be healthy (swap-heavy)
-- **Page loads**: First load after idle is slower (~3-5s) as services swap back into RAM; subsequent loads are normal
+- **Startup is slow**: ~3-5 min for all pods to be Running (swap-heavy during initial scheduling)
+- **Page loads**: First load after idle is slower (~3-5s) as pods swap back into RAM; subsequent loads are normal
 - **Event ingestion**: Handles ~1000-5000 events/day comfortably
-- **Disk**: 40GB total, ~20GB used by Sentry + Docker images, ~20GB for data
+- **Disk**: 80GB total, ~30GB used by K3s images + PVCs, ~50GB for data
 - **Retention**: Default 30 days to keep disk usage low
+- **Disabled features**: Profiling, spans, uptime, feedback, and symbolicator are disabled to save memory
 
 > [!TIP]
-> If you need faster performance, upgrade to a CX32 (4 vCPU, 8GB RAM, ~EUR 7.49/mo) - see [Scaling up](#scaling-up).
+> If you need faster performance or more features, upgrade to a CPX31 (4 vCPU, 8GB RAM, 160GB disk, ~EUR 10.49/mo) for more disk, or CPX41 (8 vCPU, 16GB RAM, ~EUR 18.49/mo) to match official specs and re-enable all features.
 
 # Getting started
 
@@ -116,35 +116,19 @@ vim terraform/terraform.tfvars # Hetzner token, Cloudflare token, SSH IPs
 
 ```bash
 make tf-init
-make tf-plan    # Review: should show 1 server + DNS records (~EUR 4/mo)
+make tf-plan    # Review: should show 1 server + DNS records (~EUR 7.49/mo)
 make tf-apply
 make tf-output  # Note the server IP and SSH command
 ```
 
 Terraform creates:
 
-- Hetzner CX22 server with cloud-init (Docker, firewall, SSH hardening, 8GB swap)
+- Hetzner CX33 server with cloud-init (K3s, Helm, firewall, SSH hardening, 8GB swap)
 - Hetzner firewall (HTTP/HTTPS restricted to Cloudflare IPs only)
 - Cloudflare DNS A + AAAA records (proxied)
 - Cloudflare SSL/TLS settings (Full Strict, HSTS, TLS 1.2+)
 
-## 3. Cloudflare Origin Certificate
-
-1. **Cloudflare Dashboard** > your domain > **SSL/TLS** > **Origin Server**
-2. Click **Create Certificate** (RSA 2048, 15 years)
-3. SSH into the server and save the certificate:
-
-```bash
-ssh root@<SERVER_IP>
-mkdir -p /etc/nginx/ssl
-nano /etc/nginx/ssl/cloudflare-origin.pem       # Paste the certificate
-nano /etc/nginx/ssl/cloudflare-origin-key.pem    # Paste the private key
-chmod 600 /etc/nginx/ssl/cloudflare-origin-key.pem
-```
-
-4. Verify Cloudflare SSL mode is set to **Full (Strict)** (Terraform sets this automatically)
-
-## 4. Deploy Sentry
+## 3. Deploy Sentry
 
 ```bash
 ssh root@<SERVER_IP>
@@ -153,79 +137,64 @@ git clone <this-repo-url> /opt/sentry/deploy
 cd /opt/sentry/deploy
 cp .env.example .env && vim .env
 
-# Full deployment: server setup + Sentry install + Nginx + monitoring
+# Full deployment: server setup + Sentry install + monitoring
 make deploy
 ```
 
 > [!NOTE]
-> First deploy takes ~20-30 minutes on a CX22. The Sentry installer pulls ~10GB of Docker images and runs database migrations. Subsequent deploys (via GitHub Actions) are much faster since they only sync config changes.
+> First deploy takes ~20-30 minutes. The Helm chart pulls container images and runs database migrations. Subsequent deploys (via GitHub Actions) are much faster since they only apply config changes via `helm upgrade`.
 
 Or step by step:
 
 ```bash
-make setup              # Docker, firewall, SSH hardening, 8GB swap, kernel tuning
-make install            # Clone official self-hosted Sentry, configure, run installer (~15 min)
-make nginx              # Nginx reverse proxy + Cloudflare SSL + Authenticated Origin Pulls
-make monitoring-setup   # Prometheus + Grafana
-make start              # Start Sentry via systemd
+make setup              # K3s, Helm, firewall, SSH hardening, 8GB swap, kernel tuning
+make install            # Deploy Sentry via Helm chart (~15-30 min)
+make monitoring-setup   # Prometheus + Grafana + node-exporter
 ```
 
-## 5. Post-deploy
+## 4. Post-deploy
 
 ```bash
-make health        # Verify Sentry + Prometheus + Grafana are healthy
-make cron-setup    # Install daily backup + 5-min health monitor + weekly Docker cleanup
+make health        # Verify Sentry + K3s node + pods are healthy
+make cron-setup    # Install daily backup + 5-min health monitor + weekly image cleanup
 ```
 
 Visit `https://sentry.yourdomain.com` and log in with your admin credentials.
-
-Grafana is at `https://sentry.yourdomain.com/grafana/`.
 
 # Operations
 
 ## Service management
 
 ```bash
-make start          # Start Sentry (auto-starts on boot via systemd)
-make stop           # Stop Sentry
-make restart        # Restart all services
-make status         # Systemd status + container list
-make version        # Show installed Sentry version
-make logs           # Tail all Sentry logs
-make logs-web       # Web service only
-make logs-worker    # Worker only
-make logs-postgres  # PostgreSQL only
-make logs-nginx     # Nginx access + error logs
+make start          # Scale up all Sentry deployments
+make stop           # Scale down all Sentry deployments (0 replicas)
+make restart        # Rolling restart all deployments
+make status         # K3s node + pod status + monitoring pods
+make pods           # Detailed pod list with node/IP info
+make events         # Recent K8s events (useful for debugging)
+make top            # Pod resource usage (CPU/memory)
+make version        # Show Helm release info
+make logs           # Tail Sentry web logs
+make logs-web       # Web pod only
+make logs-worker    # Worker pod only
+make logs-postgres  # PostgreSQL pod only
 ```
 
 ## Monitoring (Prometheus + Grafana)
 
-Prometheus scrapes system metrics (CPU, RAM, disk, swap, network), Docker container metrics (per-container resource usage), and Nginx request rates. A pre-built Grafana dashboard is auto-provisioned on first boot.
+Prometheus scrapes system metrics (CPU, RAM, disk, swap, network) via node-exporter and Sentry pod metrics via K8s service discovery.
 
 ```bash
-make monitoring-up       # Start Prometheus + Grafana
-make monitoring-down     # Stop monitoring stack
-make monitoring-restart  # Restart monitoring
-make monitoring-logs     # Tail monitoring logs
-make monitoring-status   # Container status + Prometheus target health
-make health              # Full health check (Sentry + system + Prometheus + Redis + Postgres)
+make monitoring-setup    # Deploy Prometheus + Grafana + node-exporter
+make monitoring-status   # Show monitoring pod status
+make monitoring-logs     # Tail Prometheus logs
+make health              # Full health check (Sentry HTTP + pods + system + Postgres + Redis)
 make monitor             # Health check + send webhook alert on failure
 ```
 
-Prometheus alert rules fire on:
-
-- Sentry web down for > 2 min
-- Memory > 90% for > 5 min
-- Swap > 80% for > 10 min
-- Disk > 80% (warning) or > 90% (critical)
-- Disk predicted to fill within 24 hours
-- CPU > 85% for > 10 min
-- Container OOM killed
-- Container restart loops (> 3 in 15 min)
-
 ## Backups
 
-Backups include a full PostgreSQL dump (compressed, verified non-empty), Sentry config files, Nginx config, and a metadata file. Archives are verified after creation.
+Backups include a full PostgreSQL dump (compressed, verified non-empty), Helm values export, and ClickHouse metadata. Archives are verified after creation.
 
 ```bash
 make backup     # Manual backup
@@ -239,10 +208,10 @@ make cron-setup # Install daily backup at 3:00 AM
 ## Upgrading
 
 ```bash
-make upgrade    # Backup -> pull latest tag -> reinstall -> restart
+make upgrade    # Backup -> helm repo update -> helm upgrade -> verify
 ```
 
-This runs the official self-hosted installer against the latest tagged release. Always check the [self-hosted changelog](https://github.com/getsentry/self-hosted/releases) before upgrading.
+This runs `helm upgrade` with the latest chart version. Always check the [Sentry Helm chart releases](https://github.com/sentry-kubernetes/charts/releases) before upgrading.
 
 > [!CAUTION]
 > The official Sentry team [recommends upgrading regularly](https://develop.sentry.dev/self-hosted/releases/). Falling too far behind makes future upgrades harder.
@@ -279,37 +248,46 @@ Terraform configures these automatically. Verify in the Cloudflare dashboard:
 | Always Use HTTPS           | **On**                                              | SSL/TLS > Edge Certificates |
 | Minimum TLS Version        | **1.2**                                             | SSL/TLS > Edge Certificates |
 | HSTS                       | **On** (max-age 1 year, includeSubDomains, preload) | SSL/TLS > Edge Certificates |
-| Authenticated Origin Pulls | **On**                                              | SSL/TLS > Origin Server     |
 | DNS record                 | **Proxied** (orange cloud)                          | DNS                         |
 
 ## Scaling up
 
-If you outgrow the CX22, resize via Hetzner Cloud Console or update `terraform.tfvars`:
+If you outgrow the CX33, resize via Hetzner Cloud Console or update `terraform.tfvars`:
 
 ```hcl
-server_type    = "cx32"       # 4 vCPU, 8GB RAM, 80GB disk - ~EUR 7.49/mo
-enable_volume  = true         # Attach a separate data volume
-volume_size_gb = 50           # +~EUR 2.50/mo
+server_type = "cpx41"    # 8 vCPU, 16GB RAM, 240GB disk - ~EUR 18.49/mo
 ```
 
-Then run `make tf-apply`. Update `SENTRY_EVENT_RETENTION_DAYS=90` in `.env` for longer retention.
+Then run `make tf-apply`. With more RAM you can re-enable features in `k8s/sentry-values.yaml`:
+
+```yaml
+# Enable features disabled for low-memory deployment
+sentry:
+  profiling:
+    enabled: true
+  spans:
+    enabled: true
+symbolicator:
+  enabled: true
+```
+
+Update `SENTRY_EVENT_RETENTION_DAYS=90` in `.env` for longer retention and run `make upgrade`.
 
 | Server | vCPU | RAM   | Disk   | EUR/mo | Good for                       |
 | ------ | ---- | ----- | ------ | ------ | ------------------------------ |
-| CX22   | 2    | 4 GB  | 40 GB  | ~3.99  | 1-10 devs, low volume          |
-| CX32   | 4    | 8 GB  | 80 GB  | ~7.49  | 10-50 devs, moderate volume    |
-| CPX31  | 4    | 8 GB  | 160 GB | ~10.49 | 20-100 devs                    |
+| CX33   | 4    | 8 GB  | 80 GB  | ~7.49  | 1-10 devs, low volume          |
+| CPX31  | 4    | 8 GB  | 160 GB | ~10.49 | 10-50 devs, more disk          |
 | CPX41  | 8    | 16 GB | 240 GB | ~18.49 | Matches official minimum specs |
 
 # CI/CD (GitHub Actions)
 
 ## Workflows
 
-| Workflow                  | Trigger                          | What it does                                                                                                                                        |
-| ------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CI** (`ci.yml`)         | Push / PR to `main`              | ShellCheck scripts, Terraform fmt + validate, Docker Compose config check, Prometheus config + alert rule validation, Nginx syntax check, YAML lint |
-| **Deploy** (`deploy.yml`) | Push to `main` / manual dispatch | Rsync files to server via SSH, restart Sentry + Nginx + monitoring, post-deploy health check, webhook alert on failure                              |
-| **Backup** (`backup.yml`) | Daily at 3:00 AM UTC / manual    | SSH into server, run verified PostgreSQL backup, check archive integrity, alert on failure                                                          |
+| Workflow                  | Trigger                          | What it does                                                                                            |
+| ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **CI** (`ci.yml`)         | Push / PR to `main`              | ShellCheck scripts, Terraform fmt + validate, Helm template validation, K8s manifest validation, YAML lint |
+| **Deploy** (`deploy.yml`) | Push to `main` / manual dispatch | Rsync files to server, `helm upgrade --reuse-values`, post-deploy health check, webhook alert on failure   |
+| **Backup** (`backup.yml`) | Daily at 3:00 AM UTC / manual    | SSH into server, run verified PostgreSQL backup via kubectl, check archive integrity, alert on failure     |
 
 ## Required GitHub secrets
 
@@ -326,7 +304,7 @@ Set these in **Settings > Secrets and variables > Actions**:
 
 ```bash
 # Deploy a specific component
-gh workflow run deploy.yml -f target=nginx
+gh workflow run deploy.yml -f target=sentry
 gh workflow run deploy.yml -f target=monitoring
 
 # Trigger a manual backup
@@ -345,60 +323,59 @@ See [`example-app/README.md`](example-app/README.md) for setup instructions and 
 
 Despite the budget, all production security hardening is applied:
 
-| Layer        | What                                                                                                           |
-| ------------ | -------------------------------------------------------------------------------------------------------------- |
-| **Network**  | Hetzner firewall restricts HTTP/HTTPS to Cloudflare IPs only. SSH restricted to your IPs.                      |
-| **SSL**      | Cloudflare Origin Certificate + Authenticated Origin Pulls (mutual TLS). TLS 1.2+ only.                        |
-| **SSH**      | Key-only auth, password disabled, max 3 attempts, configurable port, no forwarding.                            |
-| **Firewall** | UFW + fail2ban with SSH, Nginx auth, and Nginx rate-limit jails.                                               |
-| **Docker**   | Log rotation (5MB/2 files), live-restore, file descriptor limits, memory limits on all containers.             |
-| **Sentry**   | Registration disabled, CSRF protection, secure cookies (HttpOnly, SameSite=Lax), auth rate limiting.           |
-| **Nginx**    | Rate limiting per endpoint type (auth: 5r/s, API: 50r/s, store: 100r/s), server_tokens off, WebSocket support. |
-| **OS**       | Automatic security updates (unattended-upgrades), NTP sync (chrony), kernel hardening (sysctl).                |
+| Layer           | What                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| **Network**     | Hetzner firewall restricts HTTP/HTTPS to Cloudflare IPs only. SSH restricted to your IPs.                |
+| **SSL**         | Cloudflare terminates TLS. Full (Strict) mode with TLS 1.2+ only.                                        |
+| **SSH**         | Key-only auth, password disabled, max 3 attempts, configurable port, no forwarding.                      |
+| **Firewall**    | UFW + fail2ban with SSH jail.                                                                             |
+| **K8s**         | Resource limits on all pods, K3s with default pod security, RBAC for monitoring.                          |
+| **Sentry**      | Registration disabled, CSRF protection, secure cookies (HttpOnly, SameSite=Lax), auth rate limiting.     |
+| **Ingress**     | K3s Traefik handles routing. Cloudflare WAF protects the edge.                                            |
+| **OS**          | Automatic security updates (unattended-upgrades), NTP sync (chrony), kernel hardening (sysctl).          |
 
 # Self-hosted Sentry best practices
 
 This repo follows the [official self-hosted Sentry documentation](https://develop.sentry.dev/self-hosted/) and implements the recommended [production enhancements](https://develop.sentry.dev/self-hosted/production-enhancements/):
 
-- **Reverse proxy with SSL termination**: Nginx terminates SSL, forwards `X-Forwarded-For` and `X-Forwarded-Proto`, and exposes `/_health/` for load balancer health checks
-- **`system.url-prefix`**: Set to `https://SENTRY_DOMAIN` in both `config.yml` and `sentry.conf.py`
-- **CSRF configuration**: `CSRF_TRUSTED_ORIGINS`, `SECURE_PROXY_SSL_HEADER`, `SESSION_COOKIE_SECURE` all configured for HTTPS behind a proxy
-- **Secret key persistence**: Generated once and stored on the data volume at `$SENTRY_DATA_DIR/.secret-key`, survives reinstalls and upgrades
-- **Event retention cleanup**: `SENTRY_EVENT_RETENTION_DAYS` set with the `sentry cleanup` cron job enabled
-- **Beacon disabled**: `beacon.anonymous: true` in `config.yml` to anonymize telemetry
-- **Registration disabled**: `auth.allow-registration: false` to prevent unauthorized signups
-- **Auth rate limiting**: `auth.ip-rate-limit: 10`, `auth.user-rate-limit: 5` to prevent brute force
-- **Relay in managed mode**: The default for self-hosted, handles event ingestion
-- **Symbolicator enabled**: For source map and debug symbol processing
-- **Docker resource limits**: Memory limits on every container to prevent OOM cascades
-- **Automated backups**: Verified PostgreSQL dumps with integrity checks and metadata
+- **Reverse proxy with SSL termination**: Cloudflare terminates TLS, K3s Traefik routes to Sentry pods, forwarding `X-Forwarded-For` and `X-Forwarded-Proto`
+- **`system.url-prefix`**: Set to `https://SENTRY_DOMAIN` via Helm values
+- **CSRF configuration**: `CSRF_TRUSTED_ORIGINS`, `SECURE_PROXY_SSL_HEADER`, `SESSION_COOKIE_SECURE` all configured for HTTPS behind a proxy in `config.sentryConfPy`
+- **Event retention cleanup**: `SENTRY_EVENT_RETENTION_DAYS` set via Helm values with cleanup job enabled
+- **Beacon disabled**: `beacon.anonymous: true` in config values
+- **Registration disabled**: `auth.allow-registration: false` in config values
+- **Auth rate limiting**: `auth.ip-rate-limit: 10`, `auth.user-rate-limit: 5`
+- **K8s resource limits**: Memory limits on every pod to prevent OOM cascades, with K8s eviction handling memory pressure
+- **Automated backups**: Verified PostgreSQL dumps via `kubectl exec` with Helm values export
 
 > [!NOTE]
-> The official minimum is 4 CPU + 16GB RAM + 16GB swap. This setup runs below that threshold. For production workloads exceeding ~5,000 events/day, strongly consider upgrading to a CX32 or CPX31 server. See the official [reference architectures](https://develop.sentry.dev/self-hosted/reference-architecture/) for guidance on scaling.
+> The official minimum is 4 CPU + 16GB RAM + 16GB swap. This setup runs below that threshold with non-essential features disabled. For production workloads exceeding ~5,000 events/day, strongly consider upgrading to a CPX41 server.
 
 # Disk management
 
-The 40GB disk is the main constraint on the CX22. Tips:
+The 80GB disk on the CX33 provides reasonable headroom. Tips:
 
 - **30-day retention** is the default (saves ~50% disk vs 90 days)
-- **Weekly Docker cleanup** cron removes dangling images automatically
+- **Weekly K3s image cleanup** cron removes unused container images automatically
 - `make cleanup` for immediate disk reclamation
-- `make disk` to check usage breakdown (system, Docker, backups)
-- Prometheus alerts fire at 80% disk usage and predict disk-full within 24 hours
-- If disk fills, lower retention: `SENTRY_EVENT_RETENTION_DAYS=14` in `.env` and `make restart`
+- `make disk` to check usage breakdown (system, K8s PVCs, backups)
+- If disk fills, lower retention: `SENTRY_EVENT_RETENTION_DAYS=14` in `.env` and `make upgrade`
 
 # Troubleshooting
 
-### Out of memory / slow
+### Out of memory / pods evicted
 
-This is expected on 4GB RAM. Swap absorbs the memory pressure. If containers get OOM-killed:
+K8s handles memory pressure better than Docker Compose by evicting low-priority pods. If pods keep getting evicted:
 
 ```bash
-# Check what happened
-sudo dmesg | grep -i "out of memory" | tail -5
-docker stats --no-stream
+# Check pod events
+make events
+kubectl -n sentry describe pod <pod-name>
 
-# Restart to recover
+# Check node memory pressure
+kubectl describe node | grep -A5 Conditions
+
+# Rolling restart to recover
 make restart
 ```
 
@@ -406,42 +383,43 @@ make restart
 
 ```bash
 make disk        # Check what's using space
-make cleanup     # Remove old Docker images and build cache
+make cleanup     # Remove unused K3s images
 
 # Lower retention if needed
 vim .env         # Set SENTRY_EVENT_RETENTION_DAYS=14
-make restart
+make upgrade
 ```
 
 ### Slow after idle
 
-Normal on CX22. After periods of inactivity, services get swapped out to disk. The first request triggers swap-in which takes a few seconds. Subsequent requests are normal speed.
+Normal on 8GB RAM. After periods of inactivity, pods get swapped out to disk. The first request triggers swap-in which takes a few seconds. Subsequent requests are normal speed.
 
-### SSL certificate issues
+### Pods not starting
 
 ```bash
-# Verify origin cert
-openssl x509 -noout -dates -in /etc/nginx/ssl/cloudflare-origin.pem
+# Check pod status and events
+make pods
+make events
 
-# Check Nginx config
-sudo nginx -t
-tail -f /var/log/nginx/sentry-error.log
+# Check individual pod logs
+kubectl -n sentry logs <pod-name>
+kubectl -n sentry describe pod <pod-name>
 
-# Verify Cloudflare SSL mode is "Full (Strict)" in the dashboard
+# Check Helm release status
+make helm-status
 ```
 
-### Containers not starting
+### Helm upgrade issues
 
 ```bash
-# Check systemd
-sudo systemctl status sentry
-sudo journalctl -u sentry --no-pager -n 50
+# Check what would change before upgrading
+make helm-diff
 
-# Check individual container logs
-cd /opt/sentry/self-hosted
-docker compose logs web
-docker compose logs worker
-docker compose logs postgres
+# Check current values
+make helm-values
+
+# View Helm release history
+helm -n sentry history sentry
 ```
 
 # Project structure
@@ -450,38 +428,33 @@ docker compose logs postgres
 .
 ├── .env.example                    # Configuration template
 ├── .github/workflows/
-│   ├── ci.yml                      # Lint + validate on PR/push
-│   ├── deploy.yml                  # SSH deploy on push to main
+│   ├── ci.yml                      # Lint + validate on PR/push (Helm, K8s, Terraform)
+│   ├── deploy.yml                  # Helm upgrade on push to main
 │   └── backup.yml                  # Daily automated backup (3:00 AM UTC)
-├── Makefile                        # All operations (run `make help`)
-├── docker-compose.override.yml     # Memory limits tuned for 4GB server
-├── monitoring/
-│   ├── docker-compose.yml          # Prometheus + Grafana + node_exporter + cAdvisor
-│   ├── prometheus/
-│   │   ├── prometheus.yml          # Scrape targets (node, cadvisor, nginx, sentry)
-│   │   └── alerts.yml              # Alert rules (memory, disk, OOM, sentry down)
-│   └── grafana/
-│       ├── provisioning/           # Auto-configured datasource + dashboard provider
-│       └── dashboards/             # Pre-built Sentry server overview dashboard
-├── nginx/
-│   └── sentry.conf                 # Reverse proxy (Cloudflare real IP, rate limits, WebSocket)
+├── Makefile                        # All operations via kubectl/helm (run `make help`)
+├── k8s/
+│   ├── sentry-values.yaml          # Helm values tuned for 8GB RAM (memory limits, single replicas)
+│   ├── clickhouse.yaml             # ClickHouse StatefulSet + Service (external to Helm chart)
+│   └── monitoring/
+│       ├── prometheus.yaml          # Prometheus Deployment + ConfigMap + RBAC
+│       ├── grafana.yaml             # Grafana Deployment + PVC
+│       └── node-exporter.yaml       # Node Exporter DaemonSet
 ├── scripts/
-│   ├── setup-server.sh             # Server hardening (SSH, firewall, Docker, swap, kernel)
-│   ├── install-sentry.sh           # Clone self-hosted Sentry, configure, install, systemd
-│   ├── setup-nginx.sh              # Nginx + Cloudflare SSL + Authenticated Origin Pulls
-│   ├── setup-monitoring.sh         # Deploy Prometheus + Grafana + Nginx stub_status
-│   ├── backup.sh                   # Verified PostgreSQL backup with metadata
+│   ├── setup-server.sh             # Server hardening (SSH, firewall, K3s, Helm, swap, kernel)
+│   ├── install-sentry.sh           # Deploy Sentry via Helm chart
+│   ├── setup-monitoring.sh         # Deploy monitoring manifests to K8s
+│   ├── backup.sh                   # Verified PostgreSQL backup via kubectl exec
 │   ├── restore.sh                  # Interactive restore from backup archive
-│   └── monitor.sh                  # Health checks + webhook alerting
+│   └── monitor.sh                  # Health checks (pods, HTTP, Postgres, Redis) + webhook alerting
 ├── example-app/
 │   ├── app/                        # Expo Router screens (home, errors, performance)
 │   ├── src/utils/                  # Sentry SDK wrapper + traced API client
 │   └── k6/                         # Load tests (smoke, full 60k/hr, stress, spike, soak)
 └── terraform/
-    ├── main.tf                     # CX22 server + Cloudflare DNS + SSL + firewall
+    ├── main.tf                     # CX33 server + Cloudflare DNS + SSL + firewall
     ├── variables.tf                # All config with validation
     ├── outputs.tf                  # IP, URL, SSH command, cost estimate
-    ├── cloud-init.yml              # Bootstrap (Docker, SSH, sysctl, swap, fail2ban, chrony)
+    ├── cloud-init.yml              # Bootstrap (K3s, Helm, SSH, sysctl, swap, fail2ban, chrony)
     └── terraform.tfvars.example    # Variable template with server sizing table
 ```
 
@@ -490,10 +463,10 @@ docker compose logs postgres
 1. Create a new branch from `main`
 2. Make your changes
 3. Open a PR against `main`
-   - The CI workflow will automatically lint scripts, validate Terraform, check Docker Compose configs, and validate Prometheus rules
+   - The CI workflow will automatically lint scripts, validate Terraform, run Helm template checks, and validate K8s manifests
    - Provide a description of what changed and why
 4. After approval and CI passes, merge to `main`
-   - The Deploy workflow automatically syncs changes to the server
+   - The Deploy workflow automatically runs `helm upgrade` on the server
 
 # License
 

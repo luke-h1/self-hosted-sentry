@@ -1,21 +1,26 @@
 # ──────────────────────────────────────────────
-# Self-Hosted Sentry - Operations
-# Budget deployment (~$4/mo on Hetzner CX22)
+# Self-Hosted Sentry on K3s - Operations
+# Budget deployment (~$7/mo on Hetzner CX33)
 # ──────────────────────────────────────────────
-SENTRY_DIR ?= /opt/sentry/self-hosted
 DEPLOY_DIR := $(shell pwd)
+NAMESPACE  := sentry
+KUBECONFIG ?= /etc/rancher/k3s/k3s.yaml
+BACKUP_DIR := /opt/sentry/backups
 
-# Determine data directory
-SENTRY_DATA_DIR := $(shell cat /etc/sentry/data_dir 2>/dev/null || (mountpoint -q /mnt/sentry-data 2>/dev/null && echo /mnt/sentry-data) || echo /opt/sentry/data)
+export KUBECONFIG
 
-.PHONY: help preflight setup install nginx start stop restart status logs backup restore \
-        upgrade deploy health monitor disk cleanup create-user shell-web shell-postgres \
+.PHONY: help preflight setup install start stop restart status pods events top \
+        logs logs-web logs-worker logs-postgres \
+        backup restore upgrade deploy health monitor disk cleanup \
+        create-user shell-web shell-postgres ssh \
+        helm-status helm-diff helm-values \
         tf-init tf-plan tf-apply tf-destroy tf-output cron-setup \
-        monitoring-up monitoring-down monitoring-restart monitoring-logs monitoring-status
+        monitoring-setup monitoring-status monitoring-logs \
+        version
 
 help: ## Show this help
 	@echo ""
-	@echo "Self-Hosted Sentry (~$$4/mo budget)"
+	@echo "Self-Hosted Sentry on K3s (~$$7/mo budget)"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -29,7 +34,8 @@ preflight: ## Run pre-deployment checks
 	@test -f .env && echo "[PASS] .env exists" || (echo "[FAIL] .env not found" && exit 1)
 	@grep -q "CHANGE_ME" .env && echo "[FAIL] Default password still in .env" && exit 1 || echo "[PASS] Password changed"
 	@test -f terraform/terraform.tfvars && echo "[PASS] terraform.tfvars exists" || echo "[WARN] terraform.tfvars not found"
-	@command -v docker >/dev/null 2>&1 && echo "[PASS] Docker installed" || echo "[INFO] Docker not installed (install on server)"
+	@command -v kubectl >/dev/null 2>&1 && echo "[PASS] kubectl available" || echo "[INFO] kubectl not available (install on server)"
+	@command -v helm >/dev/null 2>&1 && echo "[PASS] Helm installed" || echo "[INFO] Helm not installed (install on server)"
 	@command -v terraform >/dev/null 2>&1 && echo "[PASS] Terraform installed" || echo "[WARN] Terraform not installed"
 	@echo ""
 
@@ -54,91 +60,90 @@ tf-output: ## Show Terraform outputs (IP, URL, etc.)
 
 # ── Deployment ──────────────────────────────
 
-setup: ## [Server] Initial setup (Docker, firewall, 8GB swap)
+setup: ## [Server] Initial setup (K3s, Helm, firewall, swap)
 	sudo bash scripts/setup-server.sh
 
-install: ## [Server] Install Sentry (~15-30 min on CX22)
+install: ## [Server] Install Sentry via Helm (~15-30 min)
 	sudo bash scripts/install-sentry.sh
 
-nginx: ## [Server] Configure Nginx + Cloudflare SSL
-	sudo bash scripts/setup-nginx.sh
-
-monitoring-setup: ## [Server] Install Prometheus + Grafana monitoring
+monitoring-setup: ## [Server] Install Prometheus + Grafana
 	sudo bash scripts/setup-monitoring.sh
 
-deploy: preflight setup install nginx start monitoring-setup ## [Server] Full deployment (Sentry + monitoring)
+deploy: preflight setup install monitoring-setup ## [Server] Full deployment (K3s + Sentry + monitoring)
 	@echo ""
 	@echo "========================================="
 	@echo "  Deployment complete!"
-	@echo "  Sentry:  https://$$(grep SENTRY_DOMAIN .env | cut -d= -f2)"
-	@echo "  Grafana: https://$$(grep SENTRY_DOMAIN .env | cut -d= -f2)/grafana/"
+	@echo "  Sentry: https://$$(grep SENTRY_DOMAIN .env | cut -d= -f2)"
 	@echo "========================================="
 
 # ── Service Operations ──────────────────────
 
-start: ## Start Sentry
-	@if systemctl is-active --quiet sentry 2>/dev/null; then \
-		echo "Sentry is already running"; \
-	else \
-		sudo systemctl start sentry; \
-		echo "Sentry is starting up (may take a minute on CX22)..."; \
-		echo "Check status: make status"; \
-	fi
+start: ## Scale up all Sentry deployments
+	kubectl -n $(NAMESPACE) scale deployment --all --replicas=1
+	@echo "Sentry is scaling up..."
 
-stop: ## Stop Sentry
-	sudo systemctl stop sentry
+stop: ## Scale down all Sentry deployments
+	kubectl -n $(NAMESPACE) scale deployment --all --replicas=0
+	@echo "Sentry is scaled down"
 
-restart: ## Restart Sentry
-	sudo systemctl restart sentry
+restart: ## Rolling restart all Sentry deployments
+	kubectl -n $(NAMESPACE) rollout restart deployment
+	@echo "Rolling restart initiated"
 
-status: ## Show service status
-	@echo "── Systemd ──"
-	@sudo systemctl status sentry --no-pager 2>/dev/null || true
+status: ## Show pod and service status
+	@echo "── K3s Node ──"
+	@kubectl get nodes -o wide 2>/dev/null || true
 	@echo ""
-	@echo "── Sentry Containers ──"
-	@cd $(SENTRY_DIR) && docker compose ps 2>/dev/null || true
+	@echo "── Sentry Pods ──"
+	@kubectl -n $(NAMESPACE) get pods 2>/dev/null || true
 	@echo ""
-	@echo "── Monitoring Containers ──"
-	@docker compose -f $(DEPLOY_DIR)/monitoring/docker-compose.yml ps 2>/dev/null || echo "  Not running"
+	@echo "── Monitoring Pods ──"
+	@kubectl -n monitoring get pods 2>/dev/null || echo "  Not deployed"
 
-logs: ## Tail all Sentry logs
-	cd $(SENTRY_DIR) && docker compose logs -f --tail=50
+pods: ## Show all pods in sentry namespace
+	kubectl -n $(NAMESPACE) get pods -o wide
 
-logs-web: ## Tail web logs
-	cd $(SENTRY_DIR) && docker compose logs -f --tail=50 web
+events: ## Show recent K8s events in sentry namespace
+	kubectl -n $(NAMESPACE) get events --sort-by='.lastTimestamp' | tail -30
 
-logs-worker: ## Tail worker logs
-	cd $(SENTRY_DIR) && docker compose logs -f --tail=50 worker
+top: ## Show resource usage for sentry pods
+	kubectl -n $(NAMESPACE) top pods 2>/dev/null || echo "Metrics server not available"
 
-logs-nginx: ## Tail Nginx logs
-	sudo tail -f /var/log/nginx/sentry-access.log /var/log/nginx/sentry-error.log
+# ── Logs ────────────────────────────────────
 
-logs-postgres: ## Tail PostgreSQL logs
-	cd $(SENTRY_DIR) && docker compose logs -f --tail=50 postgres
+logs: ## Tail all Sentry web logs
+	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/name=sentry --tail=50 --max-log-requests=10
+
+logs-web: ## Tail web pod logs
+	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/component=web --tail=50
+
+logs-worker: ## Tail worker pod logs
+	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/component=worker --tail=50
+
+logs-postgres: ## Tail PostgreSQL pod logs
+	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/name=postgresql --tail=50
+
+# ── Helm ────────────────────────────────────
+
+helm-status: ## Show Helm release status
+	helm -n $(NAMESPACE) status sentry
+
+helm-diff: ## Show what would change in a Helm upgrade
+	helm -n $(NAMESPACE) diff upgrade sentry sentry/sentry -f k8s/sentry-values.yaml 2>/dev/null || echo "Install helm-diff plugin: helm plugin install https://github.com/databus23/helm-diff"
+
+helm-values: ## Show current Helm values
+	helm -n $(NAMESPACE) get values sentry
 
 # ── Monitoring ──────────────────────────────
 
-monitoring-up: ## Start Prometheus + Grafana
-	cd $(DEPLOY_DIR) && docker compose -f monitoring/docker-compose.yml up -d
-	@echo "Grafana: https://$$(grep SENTRY_DOMAIN .env 2>/dev/null | cut -d= -f2)/grafana/"
+monitoring-status: ## Show monitoring pod status
+	@echo "── Monitoring Pods ──"
+	@kubectl -n monitoring get pods 2>/dev/null || echo "  Not deployed"
 
-monitoring-down: ## Stop Prometheus + Grafana
-	cd $(DEPLOY_DIR) && docker compose -f monitoring/docker-compose.yml down
+monitoring-logs: ## Tail monitoring logs
+	kubectl -n monitoring logs -f -l app=prometheus --tail=50
 
-monitoring-restart: ## Restart monitoring stack
-	cd $(DEPLOY_DIR) && docker compose -f monitoring/docker-compose.yml restart
-
-monitoring-logs: ## Tail monitoring stack logs
-	cd $(DEPLOY_DIR) && docker compose -f monitoring/docker-compose.yml logs -f --tail=50
-
-monitoring-status: ## Show monitoring container status
-	@echo "── Monitoring ──"
-	@cd $(DEPLOY_DIR) && docker compose -f monitoring/docker-compose.yml ps
-	@echo ""
-	@echo "── Prometheus targets ──"
-	@curl -sf http://127.0.0.1:9090/api/v1/targets 2>/dev/null | jq -r '.data.activeTargets[] | "\(.labels.job): \(.health)"' 2>/dev/null || echo "  Prometheus not reachable"
-
-health: ## Health check (HTTP, containers, disk, RAM, swap)
+health: ## Health check (HTTP, pods, disk, RAM, swap)
 	@bash scripts/monitor.sh
 
 monitor: ## Health check + webhook alert on failure
@@ -151,27 +156,24 @@ backup: ## Create verified backup
 
 restore: ## Restore from backup (interactive)
 	@echo "Available backups:"
-	@ls -lh $(SENTRY_DATA_DIR)/backups/*.tar.gz 2>/dev/null || echo "  No backups found"
+	@ls -lh $(BACKUP_DIR)/*.tar.gz 2>/dev/null || echo "  No backups found"
 	@echo ""
 	@read -p "Backup file path: " backup_file && sudo bash scripts/restore.sh "$$backup_file"
 
-cleanup: ## Clean up Docker (reclaim disk space)
-	cd $(SENTRY_DIR) && docker compose down --remove-orphans
-	docker system prune -f
-	docker image prune -a -f --filter "until=72h"
+cleanup: ## Clean up unused K3s images (reclaim disk space)
+	sudo k3s crictl rmi --prune 2>/dev/null || true
 	@echo "Cleanup complete"
 	@df -h / | tail -1 | awk '{printf "  Disk: %s free\n", $$4}'
 
-upgrade: ## Upgrade Sentry (backs up first)
-	@echo "Step 1/4: Backup..."
+upgrade: ## Upgrade Sentry via Helm (backs up first)
+	@echo "Step 1/3: Backup..."
 	@sudo bash scripts/backup.sh
-	@echo "Step 2/4: Pull latest..."
-	cd $(SENTRY_DIR) && git fetch --tags
-	cd $(SENTRY_DIR) && git checkout $$(git describe --tags $$(git rev-list --tags --max-count=1))
-	@echo "Step 3/4: Reinstall..."
-	cd $(SENTRY_DIR) && ./install.sh --skip-user-creation --no-report-self-hosted-issues
-	@echo "Step 4/4: Restart..."
-	cd $(SENTRY_DIR) && docker compose up -d
+	@echo "Step 2/3: Helm upgrade..."
+	helm repo update
+	helm upgrade sentry sentry/sentry -n $(NAMESPACE) \
+		-f k8s/sentry-values.yaml --reuse-values --timeout 30m --wait
+	@echo "Step 3/3: Verify..."
+	kubectl -n $(NAMESPACE) get pods
 	@echo "Upgrade complete! Run 'make health' to verify."
 
 # ── Cron Jobs ───────────────────────────────
@@ -179,11 +181,11 @@ upgrade: ## Upgrade Sentry (backs up first)
 cron-setup: ## Install backup + monitoring cron jobs
 	@(crontab -l 2>/dev/null; \
 	  echo "# Sentry backup - daily at 3:00 AM"; \
-	  echo "0 3 * * * $(DEPLOY_DIR)/scripts/backup.sh >> /var/log/sentry-backup.log 2>&1"; \
+	  echo "0 3 * * * KUBECONFIG=/etc/rancher/k3s/k3s.yaml $(DEPLOY_DIR)/scripts/backup.sh >> /var/log/sentry-backup.log 2>&1"; \
 	  echo "# Sentry health monitor - every 5 minutes"; \
-	  echo "*/5 * * * * $(DEPLOY_DIR)/scripts/monitor.sh --webhook >> /var/log/sentry-monitor.log 2>&1"; \
-	  echo "# Docker cleanup - weekly on Sunday at 4:00 AM"; \
-	  echo "0 4 * * 0 docker system prune -f >> /var/log/sentry-cleanup.log 2>&1"; \
+	  echo "*/5 * * * * KUBECONFIG=/etc/rancher/k3s/k3s.yaml $(DEPLOY_DIR)/scripts/monitor.sh --webhook >> /var/log/sentry-monitor.log 2>&1"; \
+	  echo "# K3s image cleanup - weekly on Sunday at 4:00 AM"; \
+	  echo "0 4 * * 0 k3s crictl rmi --prune >> /var/log/sentry-cleanup.log 2>&1"; \
 	) | sort -u | sudo crontab -
 	@echo "Cron jobs installed:"
 	@echo "  - Backup:  daily at 3:00 AM"
@@ -192,27 +194,30 @@ cron-setup: ## Install backup + monitoring cron jobs
 
 # ── Utilities ───────────────────────────────
 
-shell-web: ## Shell into web container
-	cd $(SENTRY_DIR) && docker compose exec web bash
+shell-web: ## Shell into Sentry web pod
+	kubectl -n $(NAMESPACE) exec -it $$(kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}') -- bash
 
-shell-postgres: ## Open psql
-	cd $(SENTRY_DIR) && docker compose exec postgres psql -U postgres
+shell-postgres: ## Open psql in PostgreSQL pod
+	kubectl -n $(NAMESPACE) exec -it $$(kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}') -- psql -U postgres
+
+ssh: ## SSH into the Sentry server
+	$$(cd terraform && terraform output -raw ssh_command)
 
 create-user: ## Create new Sentry user
-	cd $(SENTRY_DIR) && docker compose run --rm web createuser
+	kubectl -n $(NAMESPACE) exec -it $$(kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}') -- sentry createuser
 
 disk: ## Show disk usage
 	@echo "── System ──"
 	@df -h / | tail -1 | awk '{printf "  Root: %s used of %s (%s free)\n", $$3, $$2, $$4}'
-	@free -h | awk '/^Mem:/ {printf "  RAM:  %s used of %s\n", $$3, $$2}'
-	@free -h | awk '/^Swap:/ {printf "  Swap: %s used of %s\n", $$3, $$2}'
+	@free -h | awk '/^Mem:/ {printf "  RAM:  %s used of %s\n", $$3, $$2}' 2>/dev/null || true
+	@free -h | awk '/^Swap:/ {printf "  Swap: %s used of %s\n", $$3, $$2}' 2>/dev/null || true
 	@echo ""
-	@echo "── Docker ──"
-	@docker system df 2>/dev/null || true
+	@echo "── K8s PVCs ──"
+	@kubectl -n $(NAMESPACE) get pvc 2>/dev/null || true
 	@echo ""
 	@echo "── Backups ──"
-	@ls $(SENTRY_DATA_DIR)/backups/*.tar.gz 2>/dev/null | wc -l | xargs -I{} echo "  Count: {} backup(s)"
-	@du -sh $(SENTRY_DATA_DIR)/backups 2>/dev/null | awk '{printf "  Size:  %s\n", $$1}' || echo "  No backups"
+	@ls $(BACKUP_DIR)/*.tar.gz 2>/dev/null | wc -l | xargs -I{} echo "  Count: {} backup(s)"
+	@du -sh $(BACKUP_DIR) 2>/dev/null | awk '{printf "  Size:  %s\n", $$1}' || echo "  No backups"
 
-version: ## Show Sentry version
-	@cd $(SENTRY_DIR) && git describe --tags 2>/dev/null || echo "unknown"
+version: ## Show Sentry Helm release version
+	@helm -n $(NAMESPACE) list 2>/dev/null || echo "Helm not available"
