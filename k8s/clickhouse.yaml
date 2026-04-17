@@ -1,5 +1,3 @@
-# ClickHouse for Sentry (chart v28+ requires external ClickHouse)
-# Single node, tuned for 32GB RAM server
 apiVersion: v1
 kind: Service
 metadata:
@@ -50,7 +48,7 @@ spec:
               memory: 2Gi
             requests:
               memory: 1Gi
-              cpu: 200m
+              cpu: 250m
           volumeMounts:
             - name: data
               mountPath: /var/lib/clickhouse
@@ -86,7 +84,7 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 20Gi
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -96,8 +94,8 @@ metadata:
 data:
   sentry.xml: |
     <clickhouse>
-      <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
-      <mark_cache_size>268435456</mark_cache_size>
+      <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
+      <mark_cache_size>134217728</mark_cache_size>
       <max_concurrent_queries>20</max_concurrent_queries>
       <logger>
         <level>warning</level>

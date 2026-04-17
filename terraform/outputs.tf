@@ -33,3 +33,23 @@ output "volume_id" {
 output "cloudflare_record_id" {
   value = cloudflare_record.sentry.id
 }
+
+output "cloudflare_tunnel_id" {
+  value       = cloudflare_zero_trust_tunnel_cloudflared.sentry.id
+  description = "Cloudflare Tunnel UUID."
+}
+
+output "cloudflare_tunnel_cname_target" {
+  value       = "${cloudflare_zero_trust_tunnel_cloudflared.sentry.id}.cfargotunnel.com"
+  description = "Tunnel target for the proxied CNAME."
+}
+
+output "r2_bucket_name" {
+  value       = var.enable_r2 ? cloudflare_r2_bucket.sentry_filestore[0].name : "disabled"
+  description = "Cloudflare R2 bucket for Sentry filestore"
+}
+
+output "r2_endpoint" {
+  value       = var.enable_r2 ? "https://${nonsensitive(local.r2_account_id)}.r2.cloudflarestorage.com" : "disabled"
+  description = "R2 S3-compatible endpoint"
+}

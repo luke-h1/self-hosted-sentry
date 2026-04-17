@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Install Sentry via Helm on K3s.
-# Tuned for CX33 (8GB RAM). Idempotent.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +13,10 @@ else
   echo "ERROR: .env not found. Copy .env.example to .env and configure it."; exit 1
 fi
 
-# Validate
+if [[ -f "/opt/sentry/s3-credentials.env" ]]; then
+  set -a; source /opt/sentry/s3-credentials.env; set +a
+fi
+
 for var in SENTRY_DOMAIN SENTRY_ADMIN_EMAIL SENTRY_ADMIN_PASSWORD; do
   [[ -z "${!var:-}" ]] && echo "ERROR: $var not set in .env" && exit 1
 done
@@ -25,30 +26,26 @@ done
 echo "Installing Sentry via Helm on K3s"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Pre-flight
 echo "[0/4] Pre-flight checks..."
 TOTAL_MEM_GB=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024))
 TOTAL_SWAP_GB=$(($(grep SwapTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024))
 AVAIL_DISK=$(df -BG /opt | tail -1 | awk '{print $4}' | tr -d 'G')
 
-[[ $TOTAL_MEM_GB -lt 3 ]] && echo "ERROR: need >= 4GB RAM" && exit 1
-[[ $AVAIL_DISK -lt 15 ]] && echo "ERROR: need >= 15GB free disk" && exit 1
+[[ $TOTAL_MEM_GB -lt 15 ]] && echo "ERROR: this profile expects roughly 16GB RAM" && exit 1
+[[ $AVAIL_DISK -lt 40 ]] && echo "ERROR: need >= 40GB free disk" && exit 1
 command -v kubectl &>/dev/null || { echo "ERROR: kubectl not found (is K3s installed?)"; exit 1; }
 command -v helm &>/dev/null || { echo "ERROR: Helm not found"; exit 1; }
 kubectl get nodes &>/dev/null || { echo "ERROR: K3s not ready"; exit 1; }
 echo "  ${TOTAL_MEM_GB}GB RAM + ${TOTAL_SWAP_GB}GB swap, ${AVAIL_DISK}GB disk free"
 
-# Namespace
 echo "[1/4] Creating namespace..."
 kubectl create namespace sentry --dry-run=client -o yaml | kubectl apply -f -
 
-# ClickHouse
 echo "[2/4] Deploying ClickHouse..."
 kubectl apply -f "$PROJECT_DIR/k8s/clickhouse.yaml"
 echo "  Waiting for ClickHouse to be ready..."
 kubectl -n sentry rollout status statefulset/clickhouse --timeout=300s || true
 
-# Helm install/upgrade
 echo "[3/4] Installing Sentry via Helm (this may take 15-30 min)..."
 helm repo add sentry https://sentry-kubernetes.github.io/charts 2>/dev/null || true
 helm repo update
@@ -59,7 +56,6 @@ MAIL_PORT="${SENTRY_MAIL_PORT:-587}"
 MAIL_USER="${SENTRY_MAIL_USERNAME:-}"
 MAIL_PASS="${SENTRY_MAIL_PASSWORD:-}"
 
-# Build common Helm --set args
 HELM_SETS=(
   --set "system.url=https://${SENTRY_DOMAIN}"
   --set "user.email=${SENTRY_ADMIN_EMAIL}"
@@ -70,14 +66,27 @@ HELM_SETS=(
   --set "mail.username=${MAIL_USER}"
   --set "mail.password=${MAIL_PASS}"
   --set "ingress.hostname=${SENTRY_DOMAIN}"
-  --set "config.configYml.system\\.url-prefix=https://${SENTRY_DOMAIN}"
+  --set "config.configYml.system\.url-prefix=https://${SENTRY_DOMAIN}"
   --set "sentry.web.env[4].name=SENTRY_CSRF_TRUSTED_ORIGIN"
   --set "sentry.web.env[4].value=https://${SENTRY_DOMAIN}"
   --set "sentry.web.env[5].name=SENTRY_ADMIN_EMAIL"
   --set "sentry.web.env[5].value=${SENTRY_ADMIN_EMAIL}"
 )
 
-# GitHub OAuth (optional)
+if [[ -n "${SENTRY_S3_BUCKET:-}" && -n "${SENTRY_S3_ACCESS_KEY_ID:-}" ]]; then
+  echo "  Configuring S3 filestore (bucket: ${SENTRY_S3_BUCKET})..."
+  HELM_SETS+=(
+    --set "filestore.backend=s3"
+    --set "filestore.s3.bucketName=${SENTRY_S3_BUCKET}"
+    --set "filestore.s3.region=${SENTRY_S3_REGION:-auto}"
+    --set "filestore.s3.endpointUrl=${SENTRY_S3_ENDPOINT}"
+    --set "filestore.s3.accessKey=${SENTRY_S3_ACCESS_KEY_ID}"
+    --set "filestore.s3.secretKey=${SENTRY_S3_SECRET_ACCESS_KEY}"
+    --set "filestore.s3.signatureVersion=s3v4"
+    --set "filestore.filesystem.persistence.enabled=false"
+  )
+fi
+
 if [[ -n "${GITHUB_APP_ID:-}" ]]; then
   HELM_SETS+=(
     --set "github.appId=${GITHUB_APP_ID}"
@@ -87,13 +96,19 @@ if [[ -n "${GITHUB_APP_ID:-}" ]]; then
     --set "github.clientId=${GITHUB_CLIENT_ID:-}"
     --set "github.clientSecret=${GITHUB_CLIENT_SECRET:-}"
   )
-  # privateKey needs --set-file
   if [[ -f "${GITHUB_PRIVATE_KEY_PATH:-}" ]]; then
     HELM_SETS+=(--set-file "github.privateKey=${GITHUB_PRIVATE_KEY_PATH}")
   fi
 fi
 
-if helm status sentry -n sentry &>/dev/null; then
+HELM_STATUS=$(helm status sentry -n sentry -o json 2>/dev/null | jq -r '.info.status // empty' 2>/dev/null || true)
+if [[ "$HELM_STATUS" == pending-* ]]; then
+  echo "  Cleaning up stuck release (status: $HELM_STATUS)..."
+  helm -n sentry uninstall sentry --wait 2>/dev/null || true
+  HELM_STATUS=""
+fi
+
+if [[ "$HELM_STATUS" == "deployed" ]]; then
   echo "  Upgrading existing release..."
   helm upgrade sentry sentry/sentry -n sentry \
     -f "$PROJECT_DIR/k8s/sentry-values.yaml" \
@@ -108,9 +123,8 @@ else
 fi
 
 echo "[4/5] Seeding database options..."
-# The Helm chart's sentry.conf.py sets mail options in SENTRY_OPTIONS, making
-# them immutable via the admin UI. Our sentryConfPy deletes them so Sentry reads
-# from the database instead. Seed the DB with the correct values here.
+# The chart writes some mail/auth settings into SENTRY_OPTIONS, which makes them
+# read-only in the admin UI. Seed the database-backed values after install.
 echo "  Waiting for web pod to be ready..."
 kubectl -n sentry rollout status deploy/sentry-web --timeout=300s || true
 

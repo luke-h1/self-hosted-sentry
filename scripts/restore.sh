@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Restore Sentry from a backup archive.
 set -euo pipefail
 
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -38,7 +37,6 @@ echo "[3/4] Restoring database..."
 PG_POD=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
 [[ -z "$PG_POD" ]] && echo "ERROR: PostgreSQL pod not found" && exit 1
 
-# Wait for Postgres to be ready
 for i in {1..30}; do
   kubectl -n "$NAMESPACE" exec "$PG_POD" -- pg_isready -U postgres > /dev/null 2>&1 && break
   sleep 2
@@ -50,12 +48,10 @@ kubectl -n "$NAMESPACE" exec "$PG_POD" -- psql -U postgres -c "CREATE DATABASE s
 gunzip -c "$EXTRACTED/postgres.sql.gz" | kubectl -n "$NAMESPACE" exec -i "$PG_POD" -- psql -U postgres --quiet
 
 echo "[4/4] Scaling back up..."
-# Restore Helm values if present
 if [[ -f "$EXTRACTED/config/helm-values.yaml" ]]; then
   echo "  Restoring Helm values and upgrading..."
   helm upgrade sentry sentry/sentry -n "$NAMESPACE" -f "$EXTRACTED/config/helm-values.yaml" --timeout 15m --wait || true
 else
-  # Just scale deployments back up
   kubectl -n "$NAMESPACE" scale deployment --all --replicas=1 2>/dev/null || true
 fi
 

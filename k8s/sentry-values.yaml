@@ -1,7 +1,3 @@
-# Helm values for sentry-kubernetes/charts
-# Tuned for Hetzner CX53 (16 vCPU, 32GB RAM, 240GB disk)
-# All replicas: 1, non-essential features disabled
-
 system:
   url: ""  # Set via --set system.url=https://sentry.example.com
 
@@ -15,20 +11,20 @@ sentry:
     replicas: 1
     resources:
       limits:
-        memory: 3Gi
+        memory: 1536Mi
       requests:
-        memory: 512Mi
-        cpu: 100m
+        memory: 768Mi
+        cpu: 250m
     livenessProbe:
-      initialDelaySeconds: 120
+      initialDelaySeconds: 180
       periodSeconds: 30
       timeoutSeconds: 10
-      failureThreshold: 10
+      failureThreshold: 15
     readinessProbe:
-      initialDelaySeconds: 60
+      initialDelaySeconds: 90
       periodSeconds: 15
       timeoutSeconds: 10
-      failureThreshold: 10
+      failureThreshold: 15
     env:
       - name: SECURE_PROXY_SSL_HEADER
         value: "HTTP_X_FORWARDED_PROTO,https"
@@ -43,16 +39,16 @@ sentry:
     replicas: 1
     resources:
       limits:
-        memory: 1Gi
+        memory: 1024Mi
       requests:
-        memory: 256Mi
-        cpu: 100m
+        memory: 512Mi
+        cpu: 250m
 
   cron:
     replicas: 1
     resources:
       limits:
-        memory: 512Mi
+        memory: 384Mi
       requests:
         memory: 128Mi
         cpu: 50m
@@ -63,80 +59,38 @@ sentry:
       limits:
         memory: 512Mi
       requests:
-        memory: 128Mi
-        cpu: 50m
+        memory: 192Mi
+        cpu: 100m
 
   ingestMetricsConsumerPerf:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   ingestMetricsConsumerRh:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   ingestReplayRecordings:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   ingestMonitors:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   billingMetricsConsumer:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   subscriptionConsumerEvents:
     replicas: 1
     resources:
       limits:
-        memory: 512Mi
+        memory: 384Mi
       requests:
         memory: 128Mi
         cpu: 50m
 
   subscriptionConsumerTransactions:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   subscriptionConsumerMetrics:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   postProcessForwardErrors:
     replicas: 1
@@ -144,26 +98,14 @@ sentry:
       limits:
         memory: 512Mi
       requests:
-        memory: 128Mi
-        cpu: 50m
+        memory: 192Mi
+        cpu: 100m
 
   postProcessForwardTransactions:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   postProcessForwardIssuePlatform:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
 
   profiling:
     enabled: false
@@ -173,12 +115,14 @@ sentry:
     enabled: false
   feedback:
     enabled: false
+  taskbroker:
+    enabled: false
 
   cleanup:
-    days: 30
+    days: 14
     resources:
       limits:
-        memory: 512Mi
+        memory: 384Mi
       requests:
         memory: 128Mi
         cpu: 50m
@@ -187,10 +131,10 @@ relay:
   replicas: 1
   resources:
     limits:
-      memory: 512Mi
+      memory: 768Mi
     requests:
-      memory: 128Mi
-      cpu: 50m
+      memory: 256Mi
+      cpu: 100m
 
 snuba:
   api:
@@ -199,45 +143,33 @@ snuba:
       limits:
         memory: 512Mi
       requests:
-        memory: 128Mi
-        cpu: 50m
+        memory: 256Mi
+        cpu: 100m
   consumer:
     replicas: 1
     resources:
       limits:
-        memory: 512Mi
+        memory: 768Mi
       requests:
-        memory: 128Mi
-        cpu: 50m
+        memory: 384Mi
+        cpu: 150m
   outcomesConsumer:
     replicas: 1
     resources:
       limits:
         memory: 512Mi
       requests:
-        memory: 128Mi
-        cpu: 50m
+        memory: 256Mi
+        cpu: 100m
   sessionsConsumer:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
   transactionsConsumer:
-    replicas: 1
-    resources:
-      limits:
-        memory: 512Mi
-      requests:
-        memory: 128Mi
-        cpu: 50m
+    replicas: 0
   replacer:
     replicas: 1
     resources:
       limits:
-        memory: 512Mi
+        memory: 384Mi
       requests:
         memory: 128Mi
         cpu: 50m
@@ -245,7 +177,6 @@ snuba:
 symbolicator:
   enabled: false
 
-# Bundled nginx disabled - using K3s Traefik ingress
 nginx:
   enabled: false
 
@@ -255,7 +186,6 @@ ingress:
   hostname: ""  # Set via system.url
   regexPathStyle: traefik
 
-# External ClickHouse (deployed separately via k8s/clickhouse.yaml)
 externalClickhouse:
   host: clickhouse.sentry.svc.cluster.local
   tcpPort: 9000
@@ -267,21 +197,20 @@ externalClickhouse:
 clickhouse:
   enabled: false
 
-# Bundled PostgreSQL
 postgresql:
   enabled: true
   primary:
     resources:
       limits:
-        memory: 1Gi
+        memory: 1024Mi
       requests:
-        memory: 256Mi
-        cpu: 100m
+        memory: 512Mi
+        cpu: 250m
     persistence:
-      size: 10Gi
+      size: 8Gi
     extendedConfiguration: |
       shared_buffers = 512MB
-      effective_cache_size = 1GB
+      effective_cache_size = 2GB
       maintenance_work_mem = 128MB
       work_mem = 8MB
       max_connections = 100
@@ -289,49 +218,52 @@ postgresql:
       checkpoint_completion_target = 0.9
       random_page_cost = 1.1
       effective_io_concurrency = 200
-      min_wal_size = 64MB
+      min_wal_size = 128MB
       max_wal_size = 512MB
       log_min_duration_statement = 2000
 
 externalPostgresql:
   enabled: false
 
-# Bundled Redis
 redis:
   enabled: true
   master:
     resources:
       limits:
-        memory: 256Mi
+        memory: 768Mi
       requests:
-        memory: 64Mi
-        cpu: 50m
+        memory: 256Mi
+        cpu: 100m
     persistence:
-      size: 2Gi
+      size: 1Gi
   replica:
     replicaCount: 0
 
 externalRedis:
   enabled: false
 
-# Bundled Kafka (KRaft mode, single controller)
 kafka:
   enabled: true
   controller:
     replicaCount: 1
     resources:
       limits:
-        memory: 1Gi
+        memory: 1024Mi
       requests:
-        memory: 256Mi
-        cpu: 100m
+        memory: 512Mi
+        cpu: 250m
     persistence:
-      size: 10Gi
+      size: 5Gi
     heapOpts: "-Xmx512m -Xms256m"
   kraft:
     enabled: true
   provisioning:
     replicationFactor: 1
+    topics:
+      - name: taskworker
+      - name: taskworker-ingest
+      - name: taskworker-long
+      - name: taskworker-products
   extraConfig: |
     offsets.topic.replication.factor=1
     transaction.state.log.replication.factor=1
@@ -341,18 +273,16 @@ kafka:
 externalKafka:
   enabled: false
 
-# Zookeeper disabled (using KRaft)
 zookeeper:
   enabled: false
 
-# Memcached
 memcached:
   resources:
     limits:
       memory: 256Mi
     requests:
       memory: 64Mi
-      cpu: 50m
+      cpu: 25m
 
 mail:
   backend: smtp
@@ -361,9 +291,18 @@ mail:
 
 filestore:
   backend: filesystem
+  s3:
+    bucketName: ""  # Set via --set filestore.s3.bucketName=$SENTRY_S3_BUCKET
+    region: ""      # Set via --set filestore.s3.region=$SENTRY_S3_REGION
+    endpointUrl: "" # Set via --set filestore.s3.endpointUrl=$SENTRY_S3_ENDPOINT
+    accessKey: ""   # Set via --set filestore.s3.accessKey=$SENTRY_S3_ACCESS_KEY_ID
+    secretKey: ""   # Set via --set filestore.s3.secretKey=$SENTRY_S3_SECRET_ACCESS_KEY
+    signatureVersion: s3v4
+    defaultAcl: private
   filesystem:
     persistence:
-      size: 5Gi
+      enabled: true
+      size: 10Gi
 
 github:
   appId: ""       # Set via --set github.appId=...
@@ -384,13 +323,13 @@ config:
     SESSION_COOKIE_SAMESITE = "Lax"
     CSRF_COOKIE_SECURE = True
     CSRF_COOKIE_HTTPONLY = False
-    CSRF_TRUSTED_ORIGINS = [os.getenv("SENTRY_CSRF_TRUSTED_ORIGIN", "https://sentry.example.com")]
+    CSRF_COOKIE_SAMESITE = "None"  # Required for Cloudflare proxy
+    # Keep CSRF_TRUSTED_ORIGINS aligned with the URL Helm sets for the install.
+    _system_url = SENTRY_OPTIONS.get("system.url-prefix", os.getenv("SENTRY_CSRF_TRUSTED_ORIGIN", ""))
+    CSRF_TRUSTED_ORIGINS = [_system_url] if _system_url else []
     SOCIAL_AUTH_REDIRECT_IS_HTTPS = True
     SENTRY_RATELIMITER_OPTIONS = {}
-    # --- Immutable options fix ---
-    # The Helm chart's sentry.conf.py sets mail/auth options in SENTRY_OPTIONS,
-    # making them immutable in the admin UI. Remove them so Sentry reads from
-    # the database instead. Values are seeded by install-sentry.sh step [4/5].
+    # Drop chart-injected mail/auth options so the admin UI uses DB-backed values.
     for _k in list(SENTRY_OPTIONS.keys()):
         if _k.startswith('mail.') or _k == 'auth.allow-registration':
             del SENTRY_OPTIONS[_k]

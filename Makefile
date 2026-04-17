@@ -1,7 +1,3 @@
-# ──────────────────────────────────────────────
-# Self-Hosted Sentry on K3s - Operations
-# Budget deployment (~$7/mo on Hetzner CX33)
-# ──────────────────────────────────────────────
 DEPLOY_DIR := $(shell pwd)
 NAMESPACE  := sentry
 KUBECONFIG ?= /etc/rancher/k3s/k3s.yaml
@@ -26,8 +22,6 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 
-# ── Pre-flight ──────────────────────────────
-
 preflight: ## Run pre-deployment checks
 	@echo "── Pre-flight Checks ──"
 	@echo ""
@@ -38,8 +32,6 @@ preflight: ## Run pre-deployment checks
 	@command -v helm >/dev/null 2>&1 && echo "[PASS] Helm installed" || echo "[INFO] Helm not installed (install on server)"
 	@command -v terraform >/dev/null 2>&1 && echo "[PASS] Terraform installed" || echo "[WARN] Terraform not installed"
 	@echo ""
-
-# ── Infrastructure ──────────────────────────
 
 tf-init: ## Initialize Terraform
 	cd terraform && terraform init
@@ -58,8 +50,6 @@ tf-destroy: ## Destroy ALL infrastructure (DANGEROUS)
 tf-output: ## Show Terraform outputs (IP, URL, etc.)
 	cd terraform && terraform output
 
-# ── Deployment ──────────────────────────────
-
 setup: ## [Server] Initial setup (K3s, Helm, firewall, swap)
 	sudo bash scripts/setup-server.sh
 
@@ -75,8 +65,6 @@ deploy: preflight setup install monitoring-setup ## [Server] Full deployment (K3
 	@echo "  Deployment complete!"
 	@echo "  Sentry: https://$$(grep SENTRY_DOMAIN .env | cut -d= -f2)"
 	@echo "========================================="
-
-# ── Service Operations ──────────────────────
 
 start: ## Scale up all Sentry deployments
 	kubectl -n $(NAMESPACE) scale deployment --all --replicas=1
@@ -109,8 +97,6 @@ events: ## Show recent K8s events in sentry namespace
 top: ## Show resource usage for sentry pods
 	kubectl -n $(NAMESPACE) top pods 2>/dev/null || echo "Metrics server not available"
 
-# ── Logs ────────────────────────────────────
-
 logs: ## Tail all Sentry web logs
 	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/name=sentry --tail=50 --max-log-requests=10
 
@@ -123,8 +109,6 @@ logs-worker: ## Tail worker pod logs
 logs-postgres: ## Tail PostgreSQL pod logs
 	kubectl -n $(NAMESPACE) logs -f -l app.kubernetes.io/name=postgresql --tail=50
 
-# ── Helm ────────────────────────────────────
-
 helm-status: ## Show Helm release status
 	helm -n $(NAMESPACE) status sentry
 
@@ -133,8 +117,6 @@ helm-diff: ## Show what would change in a Helm upgrade
 
 helm-values: ## Show current Helm values
 	helm -n $(NAMESPACE) get values sentry
-
-# ── Monitoring ──────────────────────────────
 
 monitoring-status: ## Show monitoring pod status
 	@echo "── Monitoring Pods ──"
@@ -148,8 +130,6 @@ health: ## Health check (HTTP, pods, disk, RAM, swap)
 
 monitor: ## Health check + webhook alert on failure
 	@bash scripts/monitor.sh --webhook
-
-# ── Maintenance ─────────────────────────────
 
 backup: ## Create verified backup
 	sudo bash scripts/backup.sh
@@ -176,8 +156,6 @@ upgrade: ## Upgrade Sentry via Helm (backs up first)
 	kubectl -n $(NAMESPACE) get pods
 	@echo "Upgrade complete! Run 'make health' to verify."
 
-# ── Cron Jobs ───────────────────────────────
-
 cron-setup: ## Install backup + monitoring cron jobs
 	@(crontab -l 2>/dev/null; \
 	  echo "# Sentry backup - daily at 3:00 AM"; \
@@ -191,8 +169,6 @@ cron-setup: ## Install backup + monitoring cron jobs
 	@echo "  - Backup:  daily at 3:00 AM"
 	@echo "  - Monitor: every 5 minutes"
 	@echo "  - Cleanup: weekly (Sunday 4:00 AM)"
-
-# ── Utilities ───────────────────────────────
 
 shell-web: ## Shell into Sentry web pod
 	kubectl -n $(NAMESPACE) exec -it $$(kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}') -- bash

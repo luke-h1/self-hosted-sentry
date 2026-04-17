@@ -1,6 +1,6 @@
 # Self-Hosted Sentry
 
-Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with K3s, Helm, Cloudflare, Prometheus, Grafana, and GitHub Actions CI/CD. Runs on a single ~$7/mo server.
+Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with K3s, Helm, Cloudflare Tunnel, Prometheus, Grafana, and GitHub Actions CI/CD. Tuned for a single 4 vCPU / 16GB RAM server.
 
 ## Why?
 
@@ -44,50 +44,50 @@ Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan
 
 ## Cost breakdown
 
-| Resource                                  | Cost                        |
-| ----------------------------------------- | --------------------------- |
-| Hetzner CX33 (4 vCPU, 8GB RAM, 80GB SSD) | ~EUR 7.49/mo                |
-| Cloudflare (free plan)                    | $0                          |
-| **Total**                                 | **~$7.49/mo**               |
+| Resource                                 | Cost          |
+| ---------------------------------------- | ------------- |
+| Hetzner CCX23 (4 vCPU, 16GB RAM, 160GB SSD) | Check current Hetzner pricing |
+| Cloudflare (free plan)                   | $0            |
+| **Total**                                | **Server + optional volume** |
 
 ## Architecture
 
 ```
-User -> Cloudflare (DNS + CDN + WAF + SSL) -> Hetzner CX33 -> K3s Traefik Ingress -> Sentry (Helm chart)
-                                                             -> Prometheus + Grafana (K8s monitoring)
+User -> Cloudflare (DNS + Tunnel + WAF + SSL) -> cloudflared on Hetzner -> K3s Traefik -> Sentry (Helm chart)
+                                                                         -> Prometheus + Grafana (K8s monitoring, internal only)
 ```
 
-The CX33 runs everything on a single K3s node: Sentry's pods (web, worker, consumers, relay, snuba, PostgreSQL, Redis, Kafka, ClickHouse), Traefik ingress, Prometheus, Grafana, and node-exporter. Cloudflare terminates TLS; Traefik handles HTTP routing.
+The recommended host profile is a single 4 vCPU / 16GB node. `cloudflared` forwards only the Sentry hostname to local Traefik on `127.0.0.1:80`, so the VPS does not need public 80/443 exposure. **Filestore (attachments, source maps) is stored in Cloudflare R2 S3-compatible object storage**, reducing local disk dependency and keeping more local disk available for PostgreSQL, ClickHouse, and Kafka.
 
 ## Core dependencies
 
-| Technology                                                                   | Category        | Description                                                 |
-| ---------------------------------------------------------------------------- | --------------- | ----------------------------------------------------------- |
-| [Sentry Helm chart](https://github.com/sentry-kubernetes/charts)            | Error tracking  | Community Helm chart for Sentry on Kubernetes               |
-| [K3s](https://k3s.io/)                                                       | Orchestration   | Lightweight Kubernetes with built-in Traefik ingress        |
-| [Helm](https://helm.sh/)                                                     | Package manager | Manages Sentry deployment and upgrades                      |
-| [Hetzner Cloud](https://www.hetzner.com/cloud)                               | Infrastructure  | CX33 server (~EUR 7.49/mo)                                 |
-| [Cloudflare](https://cloudflare.com)                                         | DNS / CDN / SSL | Free plan with TLS termination                              |
-| [Terraform](https://www.terraform.io/)                                       | IaC             | Provisions server + DNS + SSL settings                      |
-| [Prometheus](https://prometheus.io/)                                         | Metrics         | Scrapes node and pod metrics via K8s service discovery       |
-| [Grafana](https://grafana.com/)                                              | Dashboards      | Server health dashboards                                    |
-| [k6](https://k6.io/)                                                         | Load testing    | 60k users/hour simulation                                  |
-| [GitHub Actions](https://github.com/features/actions)                        | CI/CD           | Lint, deploy via Helm, health check                         |
+| Technology                                                       | Category        | Description                                            |
+| ---------------------------------------------------------------- | --------------- | ------------------------------------------------------ |
+| [Sentry Helm chart](https://github.com/sentry-kubernetes/charts) | Error tracking  | Community Helm chart for Sentry on Kubernetes          |
+| [K3s](https://k3s.io/)                                           | Orchestration   | Lightweight Kubernetes with built-in Traefik ingress   |
+| [Helm](https://helm.sh/)                                         | Package manager | Manages Sentry deployment and upgrades                 |
+| [Hetzner Cloud](https://www.hetzner.com/cloud)                   | Infrastructure  | 4 vCPU / 16GB server profile                           |
+| [Cloudflare](https://cloudflare.com)                             | DNS / CDN / SSL | Free plan with TLS termination                         |
+| [Terraform](https://www.terraform.io/)                           | IaC             | Provisions server + DNS + SSL settings                 |
+| [Prometheus](https://prometheus.io/)                             | Metrics         | Scrapes node and pod metrics via K8s service discovery |
+| [Grafana](https://grafana.com/)                                  | Dashboards      | Server health dashboards                               |
+| [k6](https://k6.io/)                                             | Load testing    | 60k users/hour simulation                              |
+| [GitHub Actions](https://github.com/features/actions)            | CI/CD           | Lint, deploy via Helm, health check                    |
 
 ## Tradeoffs
 
 > [!IMPORTANT]
-> The official Sentry docs recommend **4 CPU, 16GB RAM + 16GB swap, 20GB disk** as minimum. This setup runs on 4 vCPU + 8GB RAM + 8GB swap with aggressive memory limits and non-essential features disabled. It works for small teams but comes with tradeoffs.
+> The official Sentry docs recommend **4 CPU, 16GB RAM + 16GB swap, 20GB disk** as minimum. This repo is now tuned around that baseline on a single 4 core / 16GB host, with 16GB swap and optional features still disabled to preserve headroom.
 
-- **Startup is slow**: ~3-5 min for all pods to be Running (swap-heavy during initial scheduling)
-- **Page loads**: First load after idle is slower (~3-5s) as pods swap back into RAM; subsequent loads are normal
-- **Event ingestion**: Handles ~1000-5000 events/day comfortably
-- **Disk**: 80GB total, ~30GB used by K3s images + PVCs, ~50GB for data
+- **Startup is still non-trivial**: ~3-5 min for all pods to settle after a cold deploy
+- **Page loads**: Much steadier than the older 8GB profile, but background consumers can still contend during upgrades and migrations
+- **Event ingestion**: Sized for a small production workload with room above the previous 8GB build
+- **Disk**: plan for at least 160GB local disk if you keep all bundled stateful services on-box
 - **Retention**: Default 30 days to keep disk usage low
 - **Disabled features**: Profiling, spans, uptime, feedback, and symbolicator are disabled to save memory
 
 > [!TIP]
-> If you need faster performance or more features, upgrade to a CPX31 (4 vCPU, 8GB RAM, 160GB disk, ~EUR 10.49/mo) for more disk, or CPX41 (8 vCPU, 16GB RAM, ~EUR 18.49/mo) to match official specs and re-enable all features.
+> If you need more throughput after this profile, move the stateful services off-box first or step up to a larger Hetzner dedicated-vCPU plan before re-enabling heavier Sentry features.
 
 # Getting started
 
@@ -106,7 +106,7 @@ cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 
 # Edit with your values
 vim .env                       # Domain, admin email/password, SMTP
-vim terraform/terraform.tfvars # Hetzner token, Cloudflare token, SSH IPs
+vim terraform/terraform.tfvars # Hetzner token, Cloudflare token, R2 config, SSH IPs
 ```
 
 > [!WARNING]
@@ -123,10 +123,11 @@ make tf-output  # Note the server IP and SSH command
 
 Terraform creates:
 
-- Hetzner CX33 server with cloud-init (K3s, Helm, firewall, SSH hardening, 8GB swap)
-- Hetzner firewall (HTTP/HTTPS restricted to Cloudflare IPs only)
-- Cloudflare DNS A + AAAA records (proxied)
-- Cloudflare SSL/TLS settings (Full Strict, HSTS, TLS 1.2+)
+- Hetzner server with cloud-init (K3s, Helm, cloudflared, firewall, SSH hardening, **16GB swap**)
+- Hetzner firewall with SSH-only inbound by default
+- Cloudflare Tunnel + proxied DNS CNAME for the Sentry hostname
+- Cloudflare cache bypass rule for the Sentry hostname
+- **Cloudflare R2 bucket + scoped API token** for Sentry filestore
 
 ## 3. Deploy Sentry
 
@@ -137,6 +138,8 @@ git clone <this-repo-url> /opt/sentry/deploy
 cd /opt/sentry/deploy
 cp .env.example .env && vim .env
 
+
+rsync -avz --exclude '.git' --exclude 'node_modules' /Users/lukehowsam/srv/dev/self-hosted-sentry/ root@<SERVER_IP>:/opt/sentry/deploy/
 # Full deployment: server setup + Sentry install + monitoring
 make deploy
 ```
@@ -147,7 +150,7 @@ make deploy
 Or step by step:
 
 ```bash
-make setup              # K3s, Helm, firewall, SSH hardening, 8GB swap, kernel tuning
+make setup              # K3s, Helm, cloudflared, firewall, SSH hardening, 16GB swap, kernel tuning
 make install            # Deploy Sentry via Helm chart (~15-30 min)
 make monitoring-setup   # Prometheus + Grafana + node-exporter
 ```
@@ -237,25 +240,80 @@ This runs `helm upgrade` with the latest chart version. Always check the [Sentry
 | `MONITOR_WEBHOOK_URL`         | -       | Slack/Discord webhook for alerts        |
 | `GRAFANA_ADMIN_USER`          | `admin` | Grafana login username                  |
 | `GRAFANA_ADMIN_PASSWORD`      | -       | Grafana login password                  |
+| `SENTRY_S3_BUCKET`            | -       | R2 bucket name (auto-set by Terraform)  |
+| `SENTRY_S3_ENDPOINT`          | -       | R2 S3 endpoint                          |
+| `SENTRY_S3_ACCESS_KEY_ID`     | -       | R2 access key (auto-set by Terraform)   |
+| `SENTRY_S3_SECRET_ACCESS_KEY` | -       | R2 secret key (auto-set by Terraform)   |
+| `R2_BACKUP_ENABLED`           | `true`  | Sync backups to R2                      |
+
+## Object Storage (Cloudflare R2)
+
+Sentry filestore (event attachments, source maps, debug symbols) is stored in **Cloudflare R2** instead of local disk. This provides:
+
+- **Zero egress fees** (unlike AWS S3)
+- **S3-compatible API** (works with existing Sentry S3 support)
+- **10GB free storage** per month
+- **Automatic replication** across Cloudflare's edge network
+
+### R2 Configuration
+
+Terraform automatically creates:
+- R2 bucket (`sentry-filestore` by default)
+- Endpoint + bucket wiring injected into the server via cloud-init
+
+You still need to create an R2 S3 access key pair in Cloudflare and place it in `terraform.tfvars` if you want Sentry to use R2 for filestore. The Cloudflare provider path that creates secondary API tokens is not reliable when authenticated only with a scoped API token.
+
+### Backup to R2
+
+Backups can be automatically synced to a separate R2 bucket:
+
+```bash
+# Enable in .env
+R2_BACKUP_ENABLED=true
+R2_BACKUP_BUCKET=sentry-backups
+
+# Run backup with R2 sync
+make backup
+```
+
+### Using a different S3 provider
+
+To use AWS S3, Hetzner Object Storage, or MinIO instead:
+
+1. Disable R2 in `terraform.tfvars`:
+   ```hcl
+   enable_r2 = false
+   ```
+
+2. Set S3 credentials in `.env`:
+   ```bash
+   SENTRY_S3_BUCKET=your-bucket
+   SENTRY_S3_REGION=us-east-1
+   SENTRY_S3_ENDPOINT=https://s3.amazonaws.com
+   SENTRY_S3_ACCESS_KEY_ID=your-access-key
+   SENTRY_S3_SECRET_ACCESS_KEY=your-secret-key
+   ```
 
 ## Cloudflare settings
 
 Terraform configures these automatically. Verify in the Cloudflare dashboard:
 
-| Setting                    | Value                                               | Location                    |
-| -------------------------- | --------------------------------------------------- | --------------------------- |
-| SSL/TLS mode               | **Full (Strict)**                                   | SSL/TLS > Overview          |
-| Always Use HTTPS           | **On**                                              | SSL/TLS > Edge Certificates |
-| Minimum TLS Version        | **1.2**                                             | SSL/TLS > Edge Certificates |
-| HSTS                       | **On** (max-age 1 year, includeSubDomains, preload) | SSL/TLS > Edge Certificates |
-| DNS record                 | **Proxied** (orange cloud)                          | DNS                         |
+| Setting             | Value                                               | Location                    |
+| ------------------- | --------------------------------------------------- | --------------------------- |
+| SSL/TLS mode        | **Full (Strict)**                                   | SSL/TLS > Overview          |
+| Always Use HTTPS    | **On**                                              | SSL/TLS > Edge Certificates |
+| Minimum TLS Version | **1.2**                                             | SSL/TLS > Edge Certificates |
+| HSTS                | **On** (max-age 1 year, includeSubDomains, preload) | SSL/TLS > Edge Certificates |
+| DNS record          | **Proxied** (orange cloud)                          | DNS                         |
 
 ## Scaling up
 
-If you outgrow the CX33, resize via Hetzner Cloud Console or update `terraform.tfvars`:
+### Vertical Scaling
+
+If you outgrow the baseline profile, resize via Hetzner Cloud Console or update `terraform.tfvars`:
 
 ```hcl
-server_type = "cpx41"    # 8 vCPU, 16GB RAM, 240GB disk - ~EUR 18.49/mo
+server_type = "ccx33"    # 8 vCPU, 32GB RAM, 240GB disk
 ```
 
 Then run `make tf-apply`. With more RAM you can re-enable features in `k8s/sentry-values.yaml`:
@@ -273,18 +331,35 @@ symbolicator:
 
 Update `SENTRY_EVENT_RETENTION_DAYS=90` in `.env` for longer retention and run `make upgrade`.
 
+### Multi-Node / HA Ready
+
+This setup is designed to make multi-node Kubernetes easier:
+
+1. **External filestore**: R2 removes local disk dependency for attachments
+2. **16GB swap**: Gives the single-node install room during upgrades and migrations without leaning on swap in steady state
+3. **K3s multi-node**: Ready to add worker nodes:
+   ```bash
+   # On existing server (control plane)
+   kubectl get node-token  # Get join token
+   
+   # On new worker node
+   curl -sfL https://get.k3s.io | K3S_URL=https://<server-ip>:6443 K3S_TOKEN=<token> sh -
+   ```
+
+For full HA, migrate PostgreSQL and Redis to managed services (Hetzner Databases, AWS RDS, etc.).
+
 | Server | vCPU | RAM   | Disk   | EUR/mo | Good for                       |
 | ------ | ---- | ----- | ------ | ------ | ------------------------------ |
-| CX33   | 4    | 8 GB  | 80 GB  | ~7.49  | 1-10 devs, low volume          |
-| CPX31  | 4    | 8 GB  | 160 GB | ~10.49 | 10-50 devs, more disk          |
-| CPX41  | 8    | 16 GB | 240 GB | ~18.49 | Matches official minimum specs |
+| CCX23  | 4    | 16 GB | 160 GB | Check current pricing | Recommended baseline |
+| CCX33  | 8    | 32 GB | 240 GB | Check current pricing | Higher sustained volume |
+| CCX43  | 16   | 64 GB | 360 GB | Check current pricing | Headroom for more features |
 
 # CI/CD (GitHub Actions)
 
 ## Workflows
 
-| Workflow                  | Trigger                          | What it does                                                                                            |
-| ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Workflow                  | Trigger                          | What it does                                                                                               |
+| ------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **CI** (`ci.yml`)         | Push / PR to `main`              | ShellCheck scripts, Terraform fmt + validate, Helm template validation, K8s manifest validation, YAML lint |
 | **Deploy** (`deploy.yml`) | Push to `main` / manual dispatch | Rsync files to server, `helm upgrade --reuse-values`, post-deploy health check, webhook alert on failure   |
 | **Backup** (`backup.yml`) | Daily at 3:00 AM UTC / manual    | SSH into server, run verified PostgreSQL backup via kubectl, check archive integrity, alert on failure     |
@@ -323,16 +398,16 @@ See [`example-app/README.md`](example-app/README.md) for setup instructions and 
 
 Despite the budget, all production security hardening is applied:
 
-| Layer           | What                                                                                                     |
-| --------------- | -------------------------------------------------------------------------------------------------------- |
-| **Network**     | Hetzner firewall restricts HTTP/HTTPS to Cloudflare IPs only. SSH restricted to your IPs.                |
-| **SSL**         | Cloudflare terminates TLS. Full (Strict) mode with TLS 1.2+ only.                                        |
-| **SSH**         | Key-only auth, password disabled, max 3 attempts, configurable port, no forwarding.                      |
-| **Firewall**    | UFW + fail2ban with SSH jail.                                                                             |
-| **K8s**         | Resource limits on all pods, K3s with default pod security, RBAC for monitoring.                          |
-| **Sentry**      | Registration disabled, CSRF protection, secure cookies (HttpOnly, SameSite=Lax), auth rate limiting.     |
-| **Ingress**     | K3s Traefik handles routing. Cloudflare WAF protects the edge.                                            |
-| **OS**          | Automatic security updates (unattended-upgrades), NTP sync (chrony), kernel hardening (sysctl).          |
+| Layer        | What                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| **Network**  | Hetzner firewall exposes SSH only by default. Sentry traffic enters through Cloudflare Tunnel.        |
+| **SSL**      | Cloudflare terminates TLS. Full (Strict) mode with TLS 1.2+ only.                                    |
+| **SSH**      | Key-only auth, password disabled, max 3 attempts, configurable port, no forwarding.                  |
+| **Firewall** | UFW + fail2ban with SSH jail.                                                                        |
+| **K8s**      | Resource limits on all pods, K3s with default pod security, RBAC for monitoring.                     |
+| **Sentry**   | Registration disabled, CSRF protection, secure cookies (HttpOnly, SameSite=Lax), auth rate limiting. |
+| **Ingress**  | `cloudflared` terminates the tunnel locally and forwards to Traefik on loopback. Cloudflare WAF protects the edge. |
+| **OS**       | Automatic security updates (unattended-upgrades), NTP sync (chrony), kernel hardening (sysctl).      |
 
 # Self-hosted Sentry best practices
 
@@ -353,7 +428,7 @@ This repo follows the [official self-hosted Sentry documentation](https://develo
 
 # Disk management
 
-The 80GB disk on the CX33 provides reasonable headroom. Tips:
+The 160GB disk on the 4 core / 16GB profile provides reasonable headroom. Tips:
 
 - **30-day retention** is the default (saves ~50% disk vs 90 days)
 - **Weekly K3s image cleanup** cron removes unused container images automatically
@@ -392,7 +467,7 @@ make upgrade
 
 ### Slow after idle
 
-Normal on 8GB RAM. After periods of inactivity, pods get swapped out to disk. The first request triggers swap-in which takes a few seconds. Subsequent requests are normal speed.
+Much less common than on the old 8GB build, but still possible after upgrades or long idle periods while background consumers reclaim memory.
 
 ### Pods not starting
 
@@ -408,6 +483,26 @@ kubectl -n sentry describe pod <pod-name>
 # Check Helm release status
 make helm-status
 ```
+
+### TaskBroker pods in CrashLoopBackOff
+
+If `sentry-taskbroker-*` pods fail with `UnknownTopicOrPartition` errors, the Kafka topics may not have been provisioned correctly:
+
+```bash
+# Check taskbroker logs for missing topic errors
+kubectl -n sentry logs sentry-taskbroker-ingest-0
+
+# List existing Kafka topics
+kubectl exec sentry-kafka-controller-0 -n sentry -- kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# Create missing taskworker topics manually
+kubectl exec sentry-kafka-controller-0 -n sentry -- kafka-topics.sh --bootstrap-server localhost:9092 --create --topic taskworker-ingest --partitions 1 --replication-factor 1
+
+# Restart the failing pod
+kubectl delete pod sentry-taskbroker-ingest-0 -n sentry
+```
+
+The `k8s/sentry-values.yaml` includes the taskworker topics in the Kafka provisioning config to prevent this on fresh installs.
 
 ### Helm upgrade issues
 
@@ -433,7 +528,7 @@ helm -n sentry history sentry
 │   └── backup.yml                  # Daily automated backup (3:00 AM UTC)
 ├── Makefile                        # All operations via kubectl/helm (run `make help`)
 ├── k8s/
-│   ├── sentry-values.yaml          # Helm values tuned for 8GB RAM (memory limits, single replicas)
+│   ├── sentry-values.yaml          # Helm values tuned for the 4 core / 16GB profile
 │   ├── clickhouse.yaml             # ClickHouse StatefulSet + Service (external to Helm chart)
 │   └── monitoring/
 │       ├── prometheus.yaml          # Prometheus Deployment + ConfigMap + RBAC
@@ -451,7 +546,7 @@ helm -n sentry history sentry
 │   ├── src/utils/                  # Sentry SDK wrapper + traced API client
 │   └── k6/                         # Load tests (smoke, full 60k/hr, stress, spike, soak)
 └── terraform/
-    ├── main.tf                     # CX33 server + Cloudflare DNS + SSL + firewall
+    ├── main.tf                     # Hetzner server + Cloudflare Tunnel + DNS + firewall
     ├── variables.tf                # All config with validation
     ├── outputs.tf                  # IP, URL, SSH command, cost estimate
     ├── cloud-init.yml              # Bootstrap (K3s, Helm, SSH, sysctl, swap, fail2ban, chrony)

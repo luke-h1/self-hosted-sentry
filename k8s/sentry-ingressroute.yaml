@@ -1,0 +1,49 @@
+# Traefik IngressRoute for Sentry API routing
+# This fixes the issue where the Helm chart generates nginx-style regex paths
+# that Traefik doesn't understand, causing API requests to fall through to
+# sentry-web which applies CSRF protection to ingestion endpoints.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sentry-api
+  namespace: sentry
+spec:
+  entryPoints:
+    - websecure
+    - web
+  routes:
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/store`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/envelope`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/security`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/minidump`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/unreal`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/`) && PathRegexp(`^/api/[0-9]+/cron`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
+    - match: Host(`sentry.lhowsam.com`) && PathPrefix(`/api/0/relays/`)
+      kind: Rule
+      services:
+        - name: sentry-relay
+          port: 3000
