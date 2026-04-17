@@ -11,7 +11,6 @@ export KUBECONFIG
         create-user shell-web shell-postgres ssh \
         helm-status helm-diff helm-values \
         tf-init tf-plan tf-apply tf-destroy tf-output cron-setup \
-        monitoring-setup monitoring-status monitoring-logs \
         version
 
 help: ## Show this help
@@ -56,10 +55,7 @@ setup: ## [Server] Initial setup (K3s, Helm, firewall, swap)
 install: ## [Server] Install Sentry via Helm (~15-30 min)
 	sudo bash scripts/install-sentry.sh
 
-monitoring-setup: ## [Server] Install Prometheus + Grafana
-	sudo bash scripts/setup-monitoring.sh
-
-deploy: preflight setup install monitoring-setup ## [Server] Full deployment (K3s + Sentry + monitoring)
+deploy: preflight setup install ## [Server] Full deployment (K3s + Sentry)
 	@echo ""
 	@echo "========================================="
 	@echo "  Deployment complete!"
@@ -84,9 +80,6 @@ status: ## Show pod and service status
 	@echo ""
 	@echo "── Sentry Pods ──"
 	@kubectl -n $(NAMESPACE) get pods 2>/dev/null || true
-	@echo ""
-	@echo "── Monitoring Pods ──"
-	@kubectl -n monitoring get pods 2>/dev/null || echo "  Not deployed"
 
 pods: ## Show all pods in sentry namespace
 	kubectl -n $(NAMESPACE) get pods -o wide
@@ -117,13 +110,6 @@ helm-diff: ## Show what would change in a Helm upgrade
 
 helm-values: ## Show current Helm values
 	helm -n $(NAMESPACE) get values sentry
-
-monitoring-status: ## Show monitoring pod status
-	@echo "── Monitoring Pods ──"
-	@kubectl -n monitoring get pods 2>/dev/null || echo "  Not deployed"
-
-monitoring-logs: ## Tail monitoring logs
-	kubectl -n monitoring logs -f -l app=prometheus --tail=50
 
 health: ## Health check (HTTP, pods, disk, RAM, swap)
 	@bash scripts/monitor.sh
@@ -156,7 +142,7 @@ upgrade: ## Upgrade Sentry via Helm (backs up first)
 	kubectl -n $(NAMESPACE) get pods
 	@echo "Upgrade complete! Run 'make health' to verify."
 
-cron-setup: ## Install backup + monitoring cron jobs
+cron-setup: ## Install backup + health-check cron jobs
 	@(crontab -l 2>/dev/null; \
 	  echo "# Sentry backup - daily at 3:00 AM"; \
 	  echo "0 3 * * * KUBECONFIG=/etc/rancher/k3s/k3s.yaml $(DEPLOY_DIR)/scripts/backup.sh >> /var/log/sentry-backup.log 2>&1"; \

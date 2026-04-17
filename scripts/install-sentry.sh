@@ -155,6 +155,11 @@ for key, value in options.items():
 print('Database options seeded successfully')
 " 2>/dev/null && echo "  Done" || echo "  WARNING: could not seed options (non-fatal)"
 
+if kubectl get namespace monitoring >/dev/null 2>&1; then
+  echo "Removing legacy monitoring namespace..."
+  kubectl delete namespace monitoring --ignore-not-found --wait=false >/dev/null 2>&1 || true
+fi
+
 echo "[5/5] Verifying..."
 kubectl -n sentry get pods
 echo ""

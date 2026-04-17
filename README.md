@@ -1,10 +1,10 @@
 # Self-Hosted Sentry
 
-Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with K3s, Helm, Cloudflare Tunnel, Prometheus, Grafana, and GitHub Actions CI/CD. Tuned for a single 4 vCPU / 16GB RAM server.
+Self-hosted [Sentry](https://sentry.io) on Hetzner Cloud with K3s, Helm, Cloudflare Tunnel, and GitHub Actions CI/CD. Tuned for a single 4 vCPU / 16GB RAM server.
 
 ## Why?
 
-Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan feature set](https://develop.sentry.dev/self-hosted/) (error tracking, performance monitoring, session replay, cron monitoring) with no per-event billing. This repo automates the entire deployment: infrastructure provisioning, security hardening, monitoring, backups, and CI/CD - all on a single cheap Hetzner box behind Cloudflare's free tier.
+Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan feature set](https://develop.sentry.dev/self-hosted/) (error tracking, performance monitoring, session replay, cron monitoring) with no per-event billing. This repo automates the entire deployment: infrastructure provisioning, security hardening, backups, and CI/CD - all on a single cheap Hetzner box behind Cloudflare's free tier.
 
 # Table of contents
 
@@ -22,7 +22,6 @@ Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan
   - [4. Post-deploy](#4-post-deploy)
 - [Operations](#operations)
   - [Service management](#service-management)
-  - [Monitoring (Prometheus + Grafana)](#monitoring-prometheus--grafana)
   - [Backups](#backups)
   - [Upgrading](#upgrading)
 - [Configuration](#configuration)
@@ -54,7 +53,6 @@ Sentry SaaS pricing adds up fast. Self-hosting gives you the full [Business plan
 
 ```
 User -> Cloudflare (DNS + Tunnel + WAF + SSL) -> cloudflared on Hetzner -> K3s Traefik -> Sentry (Helm chart)
-                                                                         -> Prometheus + Grafana (K8s monitoring, internal only)
 ```
 
 The recommended host profile is a single 4 vCPU / 16GB node. `cloudflared` forwards only the Sentry hostname to local Traefik on `127.0.0.1:80`, so the VPS does not need public 80/443 exposure. **Filestore (attachments, source maps) is stored in Cloudflare R2 S3-compatible object storage**, reducing local disk dependency and keeping more local disk available for PostgreSQL, ClickHouse, and Kafka.
@@ -69,8 +67,6 @@ The recommended host profile is a single 4 vCPU / 16GB node. `cloudflared` forwa
 | [Hetzner Cloud](https://www.hetzner.com/cloud)                   | Infrastructure  | 4 vCPU / 16GB server profile                           |
 | [Cloudflare](https://cloudflare.com)                             | DNS / CDN / SSL | Free plan with TLS termination                         |
 | [Terraform](https://www.terraform.io/)                           | IaC             | Provisions server + DNS + SSL settings                 |
-| [Prometheus](https://prometheus.io/)                             | Metrics         | Scrapes node and pod metrics via K8s service discovery |
-| [Grafana](https://grafana.com/)                                  | Dashboards      | Server health dashboards                               |
 | [k6](https://k6.io/)                                             | Load testing    | 60k users/hour simulation                              |
 | [GitHub Actions](https://github.com/features/actions)            | CI/CD           | Lint, deploy via Helm, health check                    |
 
@@ -140,7 +136,7 @@ cp .env.example .env && vim .env
 
 
 rsync -avz --exclude '.git' --exclude 'node_modules' /Users/lukehowsam/srv/dev/self-hosted-sentry/ root@<SERVER_IP>:/opt/sentry/deploy/
-# Full deployment: server setup + Sentry install + monitoring
+# Full deployment: server setup + Sentry install
 make deploy
 ```
 
@@ -152,7 +148,6 @@ Or step by step:
 ```bash
 make setup              # K3s, Helm, cloudflared, firewall, SSH hardening, 16GB swap, kernel tuning
 make install            # Deploy Sentry via Helm chart (~15-30 min)
-make monitoring-setup   # Prometheus + Grafana + node-exporter
 ```
 
 ## 4. Post-deploy
@@ -172,7 +167,7 @@ Visit `https://sentry.yourdomain.com` and log in with your admin credentials.
 make start          # Scale up all Sentry deployments
 make stop           # Scale down all Sentry deployments (0 replicas)
 make restart        # Rolling restart all deployments
-make status         # K3s node + pod status + monitoring pods
+make status         # K3s node + pod status
 make pods           # Detailed pod list with node/IP info
 make events         # Recent K8s events (useful for debugging)
 make top            # Pod resource usage (CPU/memory)
@@ -183,17 +178,7 @@ make logs-worker    # Worker pod only
 make logs-postgres  # PostgreSQL pod only
 ```
 
-## Monitoring (Prometheus + Grafana)
-
-Prometheus scrapes system metrics (CPU, RAM, disk, swap, network) via node-exporter and Sentry pod metrics via K8s service discovery.
-
-```bash
-make monitoring-setup    # Deploy Prometheus + Grafana + node-exporter
-make monitoring-status   # Show monitoring pod status
-make monitoring-logs     # Tail Prometheus logs
-make health              # Full health check (Sentry HTTP + pods + system + Postgres + Redis)
-make monitor             # Health check + send webhook alert on failure
-```
+`make health` performs local Sentry and node checks (HTTP, pods, disk, RAM, swap, PostgreSQL, Redis). `make monitor` runs the same checks and sends a webhook alert on failure.
 
 ## Backups
 
@@ -238,8 +223,6 @@ This runs `helm upgrade` with the latest chart version. Always check the [Sentry
 | `SENTRY_MAIL_USE_TLS`         | `True`  | SMTP TLS                                |
 | `BACKUP_RETENTION_DAYS`       | `7`     | Days to keep backup archives            |
 | `MONITOR_WEBHOOK_URL`         | -       | Slack/Discord webhook for alerts        |
-| `GRAFANA_ADMIN_USER`          | `admin` | Grafana login username                  |
-| `GRAFANA_ADMIN_PASSWORD`      | -       | Grafana login password                  |
 | `SENTRY_S3_BUCKET`            | -       | R2 bucket name (auto-set by Terraform)  |
 | `SENTRY_S3_ENDPOINT`          | -       | R2 S3 endpoint                          |
 | `SENTRY_S3_ACCESS_KEY_ID`     | -       | R2 access key (auto-set by Terraform)   |
@@ -378,9 +361,8 @@ Set these in **Settings > Secrets and variables > Actions**:
 ## Manual triggers
 
 ```bash
-# Deploy a specific component
-gh workflow run deploy.yml -f target=sentry
-gh workflow run deploy.yml -f target=monitoring
+# Trigger a manual deploy
+gh workflow run deploy.yml
 
 # Trigger a manual backup
 gh workflow run backup.yml
@@ -404,7 +386,7 @@ Despite the budget, all production security hardening is applied:
 | **SSL**      | Cloudflare terminates TLS. Full (Strict) mode with TLS 1.2+ only.                                    |
 | **SSH**      | Key-only auth, password disabled, max 3 attempts, configurable port, no forwarding.                  |
 | **Firewall** | UFW + fail2ban with SSH jail.                                                                        |
-| **K8s**      | Resource limits on all pods, K3s with default pod security, RBAC for monitoring.                     |
+| **K8s**      | Resource limits on all pods, K3s with default pod security.                                          |
 | **Sentry**   | Registration disabled, CSRF protection, secure cookies (HttpOnly, SameSite=Lax), auth rate limiting. |
 | **Ingress**  | `cloudflared` terminates the tunnel locally and forwards to Traefik on loopback. Cloudflare WAF protects the edge. |
 | **OS**       | Automatic security updates (unattended-upgrades), NTP sync (chrony), kernel hardening (sysctl).      |
@@ -530,14 +512,9 @@ helm -n sentry history sentry
 ├── k8s/
 │   ├── sentry-values.yaml          # Helm values tuned for the 4 core / 16GB profile
 │   ├── clickhouse.yaml             # ClickHouse StatefulSet + Service (external to Helm chart)
-│   └── monitoring/
-│       ├── prometheus.yaml          # Prometheus Deployment + ConfigMap + RBAC
-│       ├── grafana.yaml             # Grafana Deployment + PVC
-│       └── node-exporter.yaml       # Node Exporter DaemonSet
 ├── scripts/
 │   ├── setup-server.sh             # Server hardening (SSH, firewall, K3s, Helm, swap, kernel)
 │   ├── install-sentry.sh           # Deploy Sentry via Helm chart
-│   ├── setup-monitoring.sh         # Deploy monitoring manifests to K8s
 │   ├── backup.sh                   # Verified PostgreSQL backup via kubectl exec
 │   ├── restore.sh                  # Interactive restore from backup archive
 │   └── monitor.sh                  # Health checks (pods, HTTP, Postgres, Redis) + webhook alerting

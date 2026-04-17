@@ -75,12 +75,6 @@ jobs:
       - name: Validate ClickHouse manifest
         run: kubectl apply --dry-run=client -f k8s/clickhouse.yaml 2>&1 || true
 
-      - name: Validate monitoring manifests
-        run: |
-          kubectl apply --dry-run=client -f k8s/monitoring/prometheus.yaml 2>&1 || true
-          kubectl apply --dry-run=client -f k8s/monitoring/grafana.yaml 2>&1 || true
-          kubectl apply --dry-run=client -f k8s/monitoring/node-exporter.yaml 2>&1 || true
-
   lint-yaml:
     name: Lint YAML
     runs-on: ubuntu-latest
@@ -95,6 +89,5 @@ jobs:
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 200}}}' \
             k8s/sentry-values.yaml \
             k8s/clickhouse.yaml \
-            k8s/monitoring/*.yaml \
             terraform/cloud-init.yml \
             || true  # Don't fail on style warnings

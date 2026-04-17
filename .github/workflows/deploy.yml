@@ -9,16 +9,6 @@ on:
       - ".github/workflows/ci.yml"
 
   workflow_dispatch:
-    inputs:
-      target:
-        description: "What to deploy"
-        required: true
-        default: "all"
-        type: choice
-        options:
-          - all
-          - sentry
-          - monitoring
 
 concurrency:
   group: deploy
@@ -71,7 +61,6 @@ jobs:
             ./ sentry-server:/opt/sentry/deploy/
 
       - name: Deploy Sentry via Helm
-        if: github.event.inputs.target == 'all' || github.event.inputs.target == 'sentry' || github.event_name == 'push'
         run: |
           ssh sentry-server << 'DEPLOY'
           set -euo pipefail
@@ -88,29 +77,16 @@ jobs:
               -f k8s/sentry-values.yaml \
               --reuse-values \
               --timeout 15m --wait
+
+            if kubectl get namespace monitoring >/dev/null 2>&1; then
+              echo "=== Removing legacy monitoring namespace ==="
+              kubectl delete namespace monitoring --ignore-not-found --wait=false
+            fi
+
             echo "Sentry upgraded"
           else
             echo "Sentry not installed yet. Run 'make install' on the server first."
             exit 1
-          fi
-          DEPLOY
-
-      - name: Deploy monitoring
-        if: github.event.inputs.target == 'all' || github.event.inputs.target == 'monitoring' || github.event_name == 'push'
-        run: |
-          ssh sentry-server << 'DEPLOY'
-          set -euo pipefail
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          cd /opt/sentry/deploy
-
-          if kubectl -n monitoring get pods --no-headers 2>/dev/null | grep -q .; then
-            echo "=== Updating monitoring stack ==="
-            kubectl apply -f k8s/monitoring/prometheus.yaml
-            kubectl apply -f k8s/monitoring/grafana.yaml
-            kubectl apply -f k8s/monitoring/node-exporter.yaml
-            echo "Monitoring stack updated"
-          else
-            echo "Monitoring not running. Run 'make monitoring-setup' on the server first."
           fi
           DEPLOY
 
